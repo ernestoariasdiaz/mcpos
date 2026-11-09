@@ -10,8 +10,21 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
-      options: --privileged
+      # host toolchains we don't need are mounted so we can delete them and free ~25 GB:
+      # the KDE ISO's mkarchiso work dir doesn't fit in the runner's default free space
+      options: >-
+        --privileged
+        -v /usr/share/dotnet:/host/dotnet
+        -v /usr/local/lib/android:/host/android
+        -v /opt/ghc:/host/ghc
+        -v /usr/local/share/boost:/host/boost
+        -v /opt/hostedtoolcache:/host/toolcache
     steps:
+      - name: Liberar espacio en el runner
+        run: |
+          df -h / | tail -1
+          rm -rf /host/dotnet/* /host/android/* /host/ghc/* /host/boost/* /host/toolcache/* || true
+          df -h / | tail -1
       - name: Dependencias
         run: pacman -Syu --noconfirm --needed archiso rust sudo git
       - uses: actions/checkout@v5
@@ -19,9 +32,20 @@ jobs:
         run: |
           sed -i 's/\r$//' iso/*.sh
           bash ./iso/build.sh
+      - name: Resumen
+        run: |
+          ls -lh out/*.iso
+          sha256sum out/*.iso | tee out/SHA256SUMS
+          echo "### mcpOS ISO" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          ls -lh out/*.iso >> "$GITHUB_STEP_SUMMARY"
+          cat out/SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v5
         with:
           name: mcpos-iso
-          path: out/*.iso
+          path: |
+            out/*.iso
+            out/SHA256SUMS
           compression-level: 0
-          retention-days: 7
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/') && 30 || 7 }}
