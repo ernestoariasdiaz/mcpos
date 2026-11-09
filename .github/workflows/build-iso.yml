@@ -1,0 +1,25 @@
+name: build-iso
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  iso:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      options: --privileged
+    steps:
+      - name: Dependencias
+        run: pacman -Syu --noconfirm --needed archiso rust sudo git
+      - uses: actions/checkout@v4
+      - name: Build ISO
+        run: ./iso/build.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mcpos-iso
+          path: out/*.iso
+          compression-level: 0
+          retention-days: 7

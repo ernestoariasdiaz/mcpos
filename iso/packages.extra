@@ -39,3 +39,6 @@ python-atspi
 # vm guest
 qemu-guest-agent
 spice-vdagent
+# vmware guest (clipboard, auto-resize)
+open-vm-tools
+gtkmm3

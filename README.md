@@ -38,6 +38,22 @@ iso/
 
 ## Uso
 
+### Opción A: ISO con GitHub Actions (sin tener Arch)
+
+1. Sube el repo a GitHub (`git remote add origin … && git push -u origin main`).
+2. Actions → **build-iso** → *Run workflow*.
+3. Al terminar (~15 min), descarga el artifact `mcpos-iso` (un .zip con la ISO).
+
+### VMware Workstation (Windows)
+
+Nueva VM → *I will install the OS later* → Linux / *Other Linux 6.x kernel 64-bit*:
+- 4 vCPU, 6 GB RAM, disco 20 GB, red NAT
+- *VM Options → Advanced → Firmware: UEFI* (Secure Boot **desactivado**)
+- *Display → Accelerate 3D graphics* activado (si la pantalla queda negra, desactívalo: sway pasa a render por software)
+- CD/DVD → la ISO
+
+### Opción B: build local en un host con Arch
+
 En un host con Arch:
 
 ```bash
