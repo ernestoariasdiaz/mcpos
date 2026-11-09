@@ -10,7 +10,8 @@ Distro Linux de escritorio **MCP-native** para pruebas: un agente (Claude Code u
 Claude Code ──stdio──► mcpd (gateway, audit log)
                          ├── shell    exec / spawn / read_log / system_info
                          ├── journal  query / list_boots / failed_units / coredumps / coredump_info / coredump_backtrace
-                         └── desktop  get_tree / launch / sway_command / screenshot / key / type_text / pointer / clipboard / notify
+                         ├── desktop  get_tree / launch / sway_command / screenshot / key / type_text / pointer / clipboard / notify
+                         └── a11y     list_apps / tree / find / wait_for / action / focus / get_text / set_text / enable
 ```
 
 - Las tools se exponen como `<servidor>__<tool>` (p. ej. `shell__exec`, `desktop__screenshot`).
@@ -29,6 +30,7 @@ crates/
   mcp-shell/    shell sin restricciones (as_root, user, cwd, stdin, timeout)
   mcp-journal/  journalctl / systemctl --failed / coredumpctl (+ backtrace con gdb)
   mcp-desktop/  swaymsg IPC, grim, wtype, wl-clipboard, notify-send, puntero vía `seat cursor`
+  mcp-a11y/     árbol de accesibilidad AT-SPI (helper Python con GObject Atspi embebido en el binario)
 iso/
   packages.extra   paquetes que se añaden a releng (sway, firefox, gdb, bpftrace, perf, nodejs…)
   airootfs/        overlay: usuario mcp, autologin → sway, sudoers, sysctl de debug, coredumps, .mcp.json
@@ -83,6 +85,19 @@ sudo mcpos-install /dev/sda     # GPT + ESP 1G + btrfs (@, @home, @log, @snapsho
 
 Instala los mismos paquetes del live, copia mcpd/servidores/configuración y tu `/home/mcp` (incluido el login de Claude Code). Variables: `TZ_NAME`, `HOSTNAME_NEW`, `KEEP_HOME=0`.
 
+### Actualizar un mcpOS ya instalado
+
+```bash
+mcpos-update      # git pull de ~/mcpos, cargo build, instala binarios, añade servidores nuevos a servers.conf
+```
+
+La primera vez (en un sistema instalado antes de que existiera el comando):
+
+```bash
+git clone https://github.com/ernestoariasdiaz/mcpos.git ~/mcpos
+bash ~/mcpos/iso/airootfs/usr/local/sbin/mcpos-update
+```
+
 ### Probar sin ISO (en cualquier Linux con Sway)
 
 ```bash
@@ -101,8 +116,7 @@ claude mcp add mcpd -- $PWD/target/release/mcpd
 
 ## Siguientes pasos
 
-1. `mcp-a11y`: árbol AT-SPI (botones, labels, estados) con `python-atspi`, que ya va en la ISO, para que el agente "lea" la UI sin screenshots.
-2. `mcp-debug`: `strace -p`, `bpftrace` one-liners y `perf top` con salida resumida.
-3. `mcp-dbus`: bridge genérico (`busctl call/introspect`).
-4. Notificaciones MCP: stream de journal y coredumps nuevos hacia el cliente.
-5. Transporte por unix socket / streamable HTTP en `mcpd`, para correrlo como servicio systemd y conectar varios clientes.
+1. `mcp-debug`: `strace -p`, `bpftrace` one-liners y `perf top` con salida resumida.
+2. `mcp-dbus`: bridge genérico (`busctl call/introspect`).
+3. Notificaciones MCP: stream de journal y coredumps nuevos hacia el cliente.
+4. Transporte por unix socket / streamable HTTP en `mcpd`, para correrlo como servicio systemd y conectar varios clientes.

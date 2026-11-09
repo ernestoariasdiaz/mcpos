@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/mcp-core", "crates/mcpd", "crates/mcp-shell", "crates/mcp-journal", "crates/mcp-desktop"]
+members = ["crates/mcp-core", "crates/mcpd", "crates/mcp-shell", "crates/mcp-journal", "crates/mcp-desktop", "crates/mcp-a11y"]
 
 [workspace.package]
 version = "0.1.0"

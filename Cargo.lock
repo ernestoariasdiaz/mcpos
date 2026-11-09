@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "mcp-a11y"
+version = "0.1.0"
+dependencies = [
+ "mcp-core",
+]
+
+[[package]]
 name = "mcp-core"
 version = "0.1.0"
 

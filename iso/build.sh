@@ -33,7 +33,7 @@ for u in /etc/systemd/system/mcpos-setup-user.service \
          /usr/lib/systemd/system/vmware-vmblock-fuse.service; do
     ln -sf "$u" "$WANTS/$(basename "$u")"
 done
-for b in mcpd mcp-shell mcp-journal mcp-desktop; do
+for b in mcpd mcp-shell mcp-journal mcp-desktop mcp-a11y; do
     install -Dm755 "$ROOT/target/release/$b" "$PROFILE/airootfs/usr/local/bin/$b"
 done
 
@@ -53,6 +53,8 @@ file_permissions+=(
   ["/usr/local/bin/mcp-shell"]="0:0:755"
   ["/usr/local/bin/mcp-journal"]="0:0:755"
   ["/usr/local/bin/mcp-desktop"]="0:0:755"
+  ["/usr/local/bin/mcp-a11y"]="0:0:755"
+  ["/usr/local/sbin/mcpos-update"]="0:0:755"
 )
 PERMS
 

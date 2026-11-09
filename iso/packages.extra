@@ -36,6 +36,9 @@ npm
 python
 at-spi2-core
 python-atspi
+python-gobject
+# so mcpos-update can rebuild from the repo
+rust
 # vm guest
 qemu-guest-agent
 spice-vdagent

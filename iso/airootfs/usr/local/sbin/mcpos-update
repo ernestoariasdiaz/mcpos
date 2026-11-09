@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# mcpos-update — update an installed (or live) mcpOS from the git repo, without rebuilding the ISO.
+#
+#   mcpos-update            # as user mcp (uses sudo where needed)
+#
+# Env: MCPOS_REPO (default https://github.com/ernestoariasdiaz/mcpos.git), MCPOS_SRC (default ~/mcpos)
+set -euo pipefail
+trap 'printf "\e[1;31merror:\e[0m falló la línea %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
+
+REPO="${MCPOS_REPO:-https://github.com/ernestoariasdiaz/mcpos.git}"
+SRC="${MCPOS_SRC:-$HOME/mcpos}"
+say() { printf '\e[1;36m==>\e[0m %s\n' "$*"; }
+
+[[ $EUID -ne 0 ]] || { echo "ejecútalo como usuario normal (usa sudo por dentro)"; exit 1; }
+
+say "Código fuente en $SRC"
+if [[ -d $SRC/.git ]]; then
+    git -C "$SRC" pull --ff-only
+else
+    git clone "$REPO" "$SRC"
+fi
+OV="$SRC/iso/airootfs"
+
+say "Paquetes nuevos de packages.extra (si faltan)"
+mapfile -t EXTRA < <(grep -v '^#' "$SRC/iso/packages.extra" | sed '/^$/d')
+EXTRA+=(rust)
+missing=()
+for p in "${EXTRA[@]}"; do pacman -Qq "$p" >/dev/null 2>&1 || missing+=("$p"); done
+if ((${#missing[@]})); then
+    echo "instalando: ${missing[*]}"
+    sudo pacman -Sy --needed --noconfirm "${missing[@]}"
+else
+    echo "nada que instalar"
+fi
+
+say "cargo build --release"
+cargo build --release --manifest-path "$SRC/Cargo.toml"
+
+say "Instalando binarios y scripts"
+for b in "$SRC"/target/release/mcpd "$SRC"/target/release/mcp-*; do
+    [[ -f $b && -x $b && $b != *.d ]] || continue
+    sudo install -m755 "$b" /usr/local/bin/
+    echo "  $(basename "$b")"
+done
+sudo install -m755 "$OV/usr/local/bin/mcpos-agent" /usr/local/bin/
+sudo install -m755 "$OV/usr/local/sbin/mcpos-install" "$OV/usr/local/sbin/mcpos-update" /usr/local/sbin/
+
+say "servers.conf: añadiendo servidores nuevos (tus cambios se respetan)"
+while IFS= read -r line; do
+    [[ $line =~ ^[[:space:]]*([A-Za-z0-9_-]+)[[:space:]]*= ]] || continue
+    name="${BASH_REMATCH[1]}"
+    if ! grep -Eq "^[[:space:]]*$name[[:space:]]*=" /etc/mcpd/servers.conf; then
+        echo "$line" | sudo tee -a /etc/mcpd/servers.conf >/dev/null
+        echo "  + $name"
+    fi
+done < "$OV/etc/mcpd/servers.conf"
+
+say "Configuración del sistema"
+sudo install -m440 "$OV/etc/sudoers.d/10-mcp" /etc/sudoers.d/10-mcp
+sudo install -Dm644 "$OV/etc/sysctl.d/90-mcpos-debug.conf" /etc/sysctl.d/90-mcpos-debug.conf
+sudo sysctl -q --system || true
+sudo cp -r "$OV/etc/skel/." /etc/skel/
+
+say "Dotfiles de $USER (copia de seguridad *.bak si cambian)"
+for f in .bash_profile .bashrc .config/sway/config .mcp.json; do
+    src="$OV/etc/skel/$f"; dst="$HOME/$f"
+    [[ -f $src ]] || continue
+    if [[ -f $dst ]] && cmp -s "$src" "$dst"; then continue; fi
+    [[ -f $dst ]] && cp "$dst" "$dst.bak"
+    install -Dm644 "$src" "$dst"
+    echo "  $f actualizado"
+done
+
+cat <<EOF
+
+$(printf '\e[1;32m')mcpOS actualizado.$(printf '\e[0m')
+  - En Claude Code: /mcp → mcpd → Reconnect  (o reinicia mcpos-agent) para cargar las tools nuevas
+  - Si cambió .bash_profile (variables de accesibilidad): cierra sesión de Sway (Super+Shift+e) o reinicia
+EOF
