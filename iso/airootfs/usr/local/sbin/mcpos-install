@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# mcpos-install — install the running mcpOS live system to a disk (UEFI, GPT, btrfs, systemd-boot).
+#
+#   sudo mcpos-install                 # list disks
+#   sudo mcpos-install /dev/sda        # install (asks for confirmation)
+#   sudo mcpos-install /dev/sda --yes  # no questions
+#
+# Env: TZ_NAME (default America/Santo_Domingo), HOSTNAME_NEW (default mcpos), KEEP_HOME=0 to skip copying /home/mcp
+set -euo pipefail
+
+TZ_NAME="${TZ_NAME:-America/Santo_Domingo}"
+HOSTNAME_NEW="${HOSTNAME_NEW:-mcpos}"
+KEEP_HOME="${KEEP_HOME:-1}"
+MNT=/mnt
+
+say()  { printf '\e[1;36m==>\e[0m %s\n' "$*"; }
+die()  { printf '\e[1;31merror:\e[0m %s\n' "$*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || die "ejecuta con sudo"
+[[ -d /sys/firmware/efi ]] || die "la VM no arrancó en UEFI (VMware: Options → Advanced → Firmware type: UEFI)"
+
+DISK="${1:-}"
+if [[ -z $DISK ]]; then
+    echo "Discos disponibles:"
+    lsblk -d -e 7,11 -o NAME,SIZE,MODEL,TYPE
+    echo; echo "Uso: sudo mcpos-install /dev/<disco>"
+    exit 0
+fi
+[[ -b $DISK ]] || die "$DISK no es un dispositivo de bloque"
+if findmnt -rno SOURCE | grep -q "^$DISK"; then die "$DISK tiene particiones montadas"; fi
+
+if [[ ${2:-} != --yes ]]; then
+    lsblk "$DISK"
+    read -rp "Se BORRARÁ todo $DISK. Escribe SI para continuar: " ok
+    [[ $ok == SI ]] || die "cancelado"
+fi
+
+# partition names: /dev/sda1 vs /dev/nvme0n1p1
+if [[ $DISK =~ [0-9]$ ]]; then P="${DISK}p"; else P="$DISK"; fi
+ESP="${P}1"; ROOT="${P}2"
+
+say "Comprobando red"
+curl -fsI --max-time 8 https://archlinux.org >/dev/null || die "sin red: pacstrap necesita descargar paquetes"
+timedatectl set-ntp true || true
+
+say "Particionando $DISK (ESP 1G + btrfs)"
+wipefs -af "$DISK"
+sgdisk -Z "$DISK" >/dev/null
+sgdisk -n1:0:+1G -t1:ef00 -c1:ESP -n2:0:0 -t2:8300 -c2:mcpos "$DISK" >/dev/null
+partprobe "$DISK"; udevadm settle
+mkfs.fat -F32 -n ESP "$ESP" >/dev/null
+mkfs.btrfs -f -L mcpos "$ROOT" >/dev/null
+
+say "Subvolúmenes btrfs"
+mount "$ROOT" "$MNT"
+for sv in @ @home @log @snapshots; do btrfs subvolume create "$MNT/$sv" >/dev/null; done
+umount "$MNT"
+OPTS="noatime,compress=zstd:1"
+mount -o "$OPTS,subvol=@" "$ROOT" "$MNT"
+mkdir -p "$MNT"/{boot,home,var/log,.snapshots}
+mount -o "$OPTS,subvol=@home" "$ROOT" "$MNT/home"
+mount -o "$OPTS,subvol=@log" "$ROOT" "$MNT/var/log"
+mount -o "$OPTS,subvol=@snapshots" "$ROOT" "$MNT/.snapshots"
+mount "$ESP" "$MNT/boot"
+
+say "Lista de paquetes (los mismos de la ISO, sin los propios del live)"
+SKIP='^(mkinitcpio-archiso|syslinux|memtest86\+|memtest86\+-efi|edk2-shell|grub|refind|archinstall|pv)$'
+mapfile -t PKGS < <(pacman -Qqen | grep -Ev "$SKIP")
+PKGS+=(base linux linux-firmware btrfs-progs dosfstools efibootmgr sudo)
+echo "${#PKGS[@]} paquetes"
+
+say "pacstrap (descarga ~2 GB, paciencia)"
+pacstrap -K "$MNT" "${PKGS[@]}"
+
+say "fstab"
+genfstab -U "$MNT" >> "$MNT/etc/fstab"
+
+say "Copiando mcpOS (mcpd, servidores, configuración)"
+cp -a /usr/local/bin/mcpd /usr/local/bin/mcp-* "$MNT/usr/local/bin/"
+install -Dm755 "$0" "$MNT/usr/local/sbin/mcpos-install"
+for p in /etc/mcpd /etc/sudoers.d/10-mcp /etc/sysctl.d/90-mcpos-debug.conf \
+         /etc/systemd/coredump.conf.d /etc/systemd/system/getty@tty1.service.d /etc/skel; do
+    [[ -e $p ]] && { mkdir -p "$MNT$(dirname "$p")"; cp -a "$p" "$MNT$(dirname "$p")/"; }
+done
+chmod 0440 "$MNT/etc/sudoers.d/10-mcp"
+
+# mcpos-agent with the npm>=11 postinstall fix
+cat > "$MNT/usr/local/bin/mcpos-agent" <<'EOF'
+#!/bin/bash
+set -e
+cd "$HOME"
+export PATH="$HOME/.local/bin:$PATH"
+PKG="$HOME/.local/lib/node_modules/@anthropic-ai/claude-code"
+if ! claude --version >/dev/null 2>&1; then
+    [[ -d $PKG ]] || npm install -g --prefix "$HOME/.local" --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code || true
+    claude --version >/dev/null 2>&1 || node "$PKG/install.cjs"
+fi
+exec claude "$@"
+EOF
+chmod 755 "$MNT/usr/local/bin/mcpos-agent"
+
+# wired DHCP (systemd-networkd) — works in VMware/QEMU NAT
+mkdir -p "$MNT/etc/systemd/network"
+cat > "$MNT/etc/systemd/network/20-wired.network" <<'EOF'
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+EOF
+
+# better audit alias (keeps history, survives rotation)
+sed -i "s|^alias audit=.*|alias audit='tail -n 50 -F ~/.local/state/mcpd/audit.jsonl \| jq -c \"{tool,is_error,ms}\"'|" \
+    "$MNT/etc/skel/.bashrc"
+
+say "Configurando el sistema (chroot)"
+ROOT_UUID=$(blkid -s UUID -o value "$ROOT")
+UCODE=""
+[[ -f $MNT/boot/intel-ucode.img ]] && UCODE+="initrd  /intel-ucode.img"$'\n'
+[[ -f $MNT/boot/amd-ucode.img ]] && UCODE+="initrd  /amd-ucode.img"$'\n'
+
+arch-chroot "$MNT" /bin/bash -e <<CHROOT
+ln -sf /usr/share/zoneinfo/$TZ_NAME /etc/localtime
+hwclock --systohc
+sed -i 's/^#\(en_US.UTF-8\)/\1/; s/^#\(es_DO.UTF-8\)/\1/' /etc/locale.gen
+locale-gen >/dev/null
+echo LANG=en_US.UTF-8 > /etc/locale.conf
+echo $HOSTNAME_NEW > /etc/hostname
+printf '127.0.0.1 localhost\n::1 localhost\n127.0.1.1 $HOSTNAME_NEW\n' > /etc/hosts
+
+useradd -m -s /bin/bash -G wheel,video,input,audio,systemd-journal mcp
+passwd -d mcp >/dev/null
+passwd -d root >/dev/null
+
+systemctl enable systemd-networkd systemd-resolved systemd-timesyncd >/dev/null
+systemctl is-enabled vmtoolsd >/dev/null 2>&1 || systemctl enable vmtoolsd vmware-vmblock-fuse >/dev/null 2>&1 || true
+systemctl enable qemu-guest-agent >/dev/null 2>&1 || true
+ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+
+bootctl install >/dev/null
+cat > /boot/loader/loader.conf <<EOF
+default mcpos.conf
+timeout 2
+editor  no
+EOF
+cat > /boot/loader/entries/mcpos.conf <<EOF
+title   mcpOS
+linux   /vmlinuz-linux
+${UCODE}initrd  /initramfs-linux.img
+options root=UUID=$ROOT_UUID rootflags=subvol=@ rw quiet
+EOF
+cat > /boot/loader/entries/mcpos-fallback.conf <<EOF
+title   mcpOS (fallback initramfs)
+linux   /vmlinuz-linux
+${UCODE}initrd  /initramfs-linux-fallback.img
+options root=UUID=$ROOT_UUID rootflags=subvol=@ rw
+EOF
+mkinitcpio -P >/dev/null
+CHROOT
+
+if [[ $KEEP_HOME == 1 && -d /home/mcp ]]; then
+    say "Copiando /home/mcp del live (Claude Code y su login incluidos)"
+    cp -a /home/mcp/. "$MNT/home/mcp/"
+    # refresh .bashrc so the new audit alias applies
+    cp "$MNT/etc/skel/.bashrc" "$MNT/home/mcp/.bashrc"
+    arch-chroot "$MNT" chown -R mcp:mcp /home/mcp
+fi
+
+say "Desmontando"
+sync
+umount -R "$MNT"
+
+cat <<EOF
+
+$(printf '\e[1;32m')mcpOS instalado en $DISK.$(printf '\e[0m')
+  1. poweroff
+  2. VMware: CD/DVD → desmarca "Connect at power on" (o quita la ISO)
+  3. Enciende la VM: arranca mcpOS desde el disco, entra solo a Sway como 'mcp'
+EOF
