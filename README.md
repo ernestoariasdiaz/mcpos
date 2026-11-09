@@ -72,6 +72,17 @@ Aprueba el servidor `mcpd` cuando te lo pida, y prueba con algo como:
 
 > "Abre firefox, toma un screenshot, y dime si hay errores en el journal de los últimos 5 minutos."
 
+### Instalar en disco (persistente)
+
+Desde el live (VM en **UEFI**, disco de 20 GB o más):
+
+```bash
+sudo mcpos-install              # lista discos
+sudo mcpos-install /dev/sda     # GPT + ESP 1G + btrfs (@, @home, @log, @snapshots) + systemd-boot
+```
+
+Instala los mismos paquetes del live, copia mcpd/servidores/configuración y tu `/home/mcp` (incluido el login de Claude Code). Variables: `TZ_NAME`, `HOSTNAME_NEW`, `KEEP_HOME=0`.
+
 ### Probar sin ISO (en cualquier Linux con Sway)
 
 ```bash
@@ -84,7 +95,9 @@ claude mcp add mcpd -- $PWD/target/release/mcpd
 ## Probado
 
 - Sesión MCP completa contra `mcpd`: `initialize`, `tools/list` (24 tools), llamadas a shell, timeout con kill del process group, stdin UTF-8, servidor caído reportado en `status`, nombre de tool inválido y JSON roto → error -32700.
-- No probado aquí (no había Sway ni archiso en el entorno de build): las tools de `desktop` y `mkarchiso`. Ese es el primer test en la VM.
+- ISO construida en GitHub Actions y arrancada en VMware Workstation (UEFI, 3D): autologin → Sway → `mcpos-agent` → Claude Code con `mcpd` (24 tools).
+- `desktop__get_tree`, `launch`, `screenshot` y `journal__query` verificados end-to-end desde Claude Code.
+- `mcpos-install` probado en VMware: arranque desde disco con btrfs + systemd-boot y sesión de Claude persistente.
 
 ## Siguientes pasos
 

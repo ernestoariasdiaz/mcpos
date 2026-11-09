@@ -14,12 +14,12 @@ jobs:
     steps:
       - name: Dependencias
         run: pacman -Syu --noconfirm --needed archiso rust sudo git
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build ISO
         run: |
           sed -i 's/\r$//' iso/*.sh
           bash ./iso/build.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: mcpos-iso
           path: out/*.iso

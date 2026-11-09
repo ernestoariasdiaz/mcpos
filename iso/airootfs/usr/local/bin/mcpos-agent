@@ -3,8 +3,13 @@
 set -e
 cd "$HOME"
 export PATH="$HOME/.local/bin:$PATH"
-if ! command -v claude >/dev/null; then
-    echo "Instalando Claude Code..."
-    npm install -g --prefix "$HOME/.local" @anthropic-ai/claude-code
+PKG="$HOME/.local/lib/node_modules/@anthropic-ai/claude-code"
+if ! claude --version >/dev/null 2>&1; then
+    if [[ ! -d $PKG ]]; then
+        echo "Instalando Claude Code..."
+        npm install -g --prefix "$HOME/.local" --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code || true
+    fi
+    # npm >= 11 blocks postinstall by default: fetch the native binary explicitly
+    claude --version >/dev/null 2>&1 || node "$PKG/install.cjs"
 fi
 exec claude "$@"

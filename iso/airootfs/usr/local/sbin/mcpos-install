@@ -28,7 +28,14 @@ if [[ -z $DISK ]]; then
     exit 0
 fi
 [[ -b $DISK ]] || die "$DISK no es un dispositivo de bloque"
-if mountpoint -q "$MNT"; then say "Desmontando $MNT de un intento anterior"; umount -R "$MNT"; fi
+unmount_all() {
+    # pacman-key in the chroot leaves gpg-agent/dirmngr holding files under $MNT
+    pkill -f "gpg-agent.*$MNT" 2>/dev/null || true
+    killall -q gpg-agent dirmngr keyboxd 2>/dev/null || true
+    sleep 1
+    umount -R "$MNT" 2>/dev/null || umount -R -l "$MNT"
+}
+if mountpoint -q "$MNT"; then say "Desmontando $MNT de un intento anterior"; unmount_all; fi
 if findmnt -rno SOURCE | grep -q "^$DISK"; then die "$DISK tiene particiones montadas"; fi
 
 if [[ ${2:-} != --yes ]]; then
@@ -174,7 +181,7 @@ fi
 
 say "Desmontando"
 sync
-umount -R "$MNT"
+unmount_all
 
 cat <<EOF
 

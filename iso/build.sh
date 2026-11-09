@@ -47,6 +47,7 @@ cat >> "$PROFILE/profiledef.sh" <<'PERMS'
 file_permissions+=(
   ["/etc/sudoers.d/10-mcp"]="0:0:0440"
   ["/usr/local/sbin/mcpos-setup-user"]="0:0:755"
+  ["/usr/local/sbin/mcpos-install"]="0:0:755"
   ["/usr/local/bin/mcpos-agent"]="0:0:755"
   ["/usr/local/bin/mcpd"]="0:0:755"
   ["/usr/local/bin/mcp-shell"]="0:0:755"
