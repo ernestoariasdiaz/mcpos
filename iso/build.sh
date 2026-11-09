@@ -21,6 +21,18 @@ cp -r /usr/share/archiso/configs/releng "$PROFILE"
 grep -v '^#' "$HERE/packages.extra" | sed '/^$/d' >> "$PROFILE/packages.x86_64"
 sort -u -o "$PROFILE/packages.x86_64" "$PROFILE/packages.x86_64"
 cp -a "$HERE/airootfs/." "$PROFILE/airootfs/"
+# files may come from a Windows checkout: strip CRLF from our overlay
+( cd "$HERE/airootfs" && find . -type f -print0 ) | while IFS= read -r -d '' f; do
+    sed -i 's/\r$//' "$PROFILE/airootfs/$f"
+done
+# enable units here (symlinks don't survive Windows/zip round-trips)
+WANTS="$PROFILE/airootfs/etc/systemd/system/multi-user.target.wants"
+mkdir -p "$WANTS"
+for u in /etc/systemd/system/mcpos-setup-user.service \
+         /usr/lib/systemd/system/vmtoolsd.service \
+         /usr/lib/systemd/system/vmware-vmblock-fuse.service; do
+    ln -sf "$u" "$WANTS/$(basename "$u")"
+done
 for b in mcpd mcp-shell mcp-journal mcp-desktop; do
     install -Dm755 "$ROOT/target/release/$b" "$PROFILE/airootfs/usr/local/bin/$b"
 done
