@@ -1,0 +1,2 @@
+# ydotoold (mcp-desktop keyboard/pointer on KDE) needs /dev/uinput as a normal user in group input
+KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"

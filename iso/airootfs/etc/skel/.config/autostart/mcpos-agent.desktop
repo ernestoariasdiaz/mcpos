@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=mcpOS agent
+Comment=Claude Code connected to mcpd
+Exec=konsole --hide-menubar -e bash -lc "mcpos-agent; exec bash"
+Icon=utilities-terminal
+X-KDE-autostart-phase=2
+OnlyShowIn=KDE;

@@ -1,5 +1,22 @@
 # --- mcpOS additions on top of releng ---
-# desktop
+# desktop: KDE Plasma 6 (default session)
+plasma-desktop
+kwin
+konsole
+dolphin
+kate
+spectacle
+kscreen
+plasma-nm
+plasma-pa
+breeze
+breeze-gtk
+kde-gtk-config
+xdg-desktop-portal-kde
+qt6-wayland
+ydotool
+imagemagick
+# desktop: Sway (alternative session: echo sway > ~/.config/mcpos/session)
 sway
 swaybg
 swayidle

@@ -310,13 +310,56 @@ def cmd_get_text(r):
     out(text=t)
 
 
+def editable_target(acc, depth=0):
+    """The node itself if editable, else the first editable descendant (e.g. Firefox's URL bar combo box)."""
+    if "EditableText" in ifaces(acc) or "editable" in states(acc):
+        return acc
+    if depth >= 4:
+        return None
+    for c in children(acc):
+        if c is not None:
+            t = editable_target(c, depth + 1)
+            if t is not None:
+                return t
+    return None
+
+
+def type_into(acc, text):
+    """Fallback: focus, select all, type with wtype (works when the toolkit ignores EditableText)."""
+    import subprocess
+    safe(lambda: Atspi.Component.grab_focus(acc), False)
+    time.sleep(0.2)
+    try:
+        subprocess.run(["wtype", "-M", "ctrl", "-k", "a", "-m", "ctrl"], check=True, timeout=10)
+        subprocess.run(["wtype", "--", text], check=True, timeout=30)
+    except Exception as e:  # noqa: BLE001
+        return f"wtype failed: {e}"
+    time.sleep(0.3)
+    return None
+
+
 def cmd_set_text(r):
-    acc = resolve(find_app(r["app"]), r["path"])
-    if "EditableText" not in ifaces(acc):
-        out(False, error="node is not EditableText (try focus + desktop__type_text)")
-    if not safe(lambda: Atspi.EditableText.set_text_contents(acc, r["text"]), False):
-        out(False, error="set_text_contents returned false")
-    out(text="text set")
+    node = resolve(find_app(r["app"]), r["path"])
+    want = r["text"]
+    acc = editable_target(node)
+    if acc is None:
+        out(False, error="node is not editable and has no editable child: " + describe(node, r["path"], False)
+            + " — if you're sure, use focus + desktop__type_text")
+    note = "" if acc is node else " (editable child of the given node)"
+    if "EditableText" in ifaces(acc):
+        safe(lambda: Atspi.EditableText.set_text_contents(acc, want), False)
+        time.sleep(0.15)
+        if text_of(acc, len(want) + 100) == want:
+            out(text=f"text set and verified via EditableText{note}")
+    # the toolkit accepted the call but didn't apply it, or no EditableText at all
+    err = type_into(acc, want)
+    got = text_of(acc, len(want) + 100)
+    if got == want:
+        out(text=f"text set and verified via keyboard fallback (focus + ctrl+a + wtype){note}")
+    if got is None and err is None:
+        out(text=f"typed via keyboard fallback{note}; field has no Text interface, so it couldn't be verified")
+    out(False, error=f"text NOT set{note}: expected {json.dumps(want, ensure_ascii=False)}, "
+                     f"node now contains {json.dumps(got, ensure_ascii=False)}" + (f"; {err}" if err else ""))
 
 
 CMDS = {

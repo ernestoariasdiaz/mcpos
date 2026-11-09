@@ -33,6 +33,9 @@ for u in /etc/systemd/system/mcpos-setup-user.service \
          /usr/lib/systemd/system/vmware-vmblock-fuse.service; do
     ln -sf "$u" "$WANTS/$(basename "$u")"
 done
+UWANTS="$PROFILE/airootfs/etc/systemd/user/default.target.wants"
+mkdir -p "$UWANTS"
+ln -sf /etc/systemd/user/mcpos-ydotoold.service "$UWANTS/mcpos-ydotoold.service"
 for b in mcpd mcp-shell mcp-journal mcp-desktop mcp-a11y; do
     install -Dm755 "$ROOT/target/release/$b" "$PROFILE/airootfs/usr/local/bin/$b"
 done

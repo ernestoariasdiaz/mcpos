@@ -1,0 +1,10 @@
+[Unit]
+Description=ydotoold (input injection for mcp-desktop)
+
+[Service]
+ExecStart=/usr/bin/ydotoold
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

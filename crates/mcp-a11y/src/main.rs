@@ -94,9 +94,10 @@ fn main() {
         .tool("get_text", "Full text content of a node (entries, documents, terminals that support it).",
             schema(&[app, path, ("limit", "integer", "Max chars (default 20000)")], &["app", "path"]),
             |a| helper("get_text", a, 30))
-        .tool("set_text", "Replace the content of an editable text node.",
+        .tool("set_text", "Replace the content of an editable text node (or its editable child, e.g. a URL bar combo box). \
+             Verifies by reading it back; falls back to focus + ctrl+a + typing. Reports failure if the text didn't stick.",
             schema(&[app, path, ("text", "string", "New content")], &["app", "path", "text"]),
-            |a| helper("set_text", a, 20));
+            |a| helper("set_text", a, 45));
 
     serve_stdio(
         "mcp-a11y",

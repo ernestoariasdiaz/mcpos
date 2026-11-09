@@ -89,8 +89,11 @@ genfstab -U "$MNT" >> "$MNT/etc/fstab"
 say "Copiando mcpOS (mcpd, servidores, configuración)"
 cp -a /usr/local/bin/mcpd /usr/local/bin/mcp-* "$MNT/usr/local/bin/"
 install -Dm755 "$0" "$MNT/usr/local/sbin/mcpos-install"
+[[ -f /usr/local/sbin/mcpos-update ]] && install -Dm755 /usr/local/sbin/mcpos-update "$MNT/usr/local/sbin/mcpos-update"
 for p in /etc/mcpd /etc/sudoers.d/10-mcp /etc/sysctl.d/90-mcpos-debug.conf \
-         /etc/systemd/coredump.conf.d /etc/systemd/system/getty@tty1.service.d /etc/skel; do
+         /etc/systemd/coredump.conf.d /etc/systemd/system/getty@tty1.service.d /etc/skel \
+         /etc/udev/rules.d/80-mcpos-uinput.rules /etc/modules-load.d/mcpos-uinput.conf \
+         /etc/systemd/user/mcpos-ydotoold.service; do
     [[ -e $p ]] && { mkdir -p "$MNT$(dirname "$p")"; cp -a "$p" "$MNT$(dirname "$p")/"; }
 done
 chmod 0440 "$MNT/etc/sudoers.d/10-mcp"
@@ -146,6 +149,7 @@ passwd -d root >/dev/null
 systemctl enable systemd-networkd systemd-resolved systemd-timesyncd >/dev/null
 systemctl is-enabled vmtoolsd >/dev/null 2>&1 || systemctl enable vmtoolsd vmware-vmblock-fuse >/dev/null 2>&1 || true
 systemctl enable qemu-guest-agent >/dev/null 2>&1 || true
+systemctl --global enable mcpos-ydotoold.service >/dev/null 2>&1 || true
 
 bootctl install >/dev/null
 cat > /boot/loader/loader.conf <<EOF

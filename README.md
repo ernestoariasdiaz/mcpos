@@ -1,6 +1,6 @@
 # mcpOS
 
-Distro Linux de escritorio **MCP-native** para pruebas: un agente (Claude Code u otro cliente MCP) controla el sistema completo —shell como root, journal, coredumps y el escritorio Sway— a través de un único gateway MCP.
+Distro Linux de escritorio **MCP-native** para pruebas: un agente (Claude Code u otro cliente MCP) controla el sistema completo —shell como root, journal, coredumps, el escritorio **KDE Plasma** y el árbol de accesibilidad de cada app— a través de un único gateway MCP.
 
 > ⚠️ Imagen de pruebas **solo para VM**: el usuario `mcp` tiene `sudo` sin contraseña, `ptrace_scope=0` y `perf_event_paranoid=-1`.
 
@@ -10,7 +10,8 @@ Distro Linux de escritorio **MCP-native** para pruebas: un agente (Claude Code u
 Claude Code ──stdio──► mcpd (gateway, audit log)
                          ├── shell    exec / spawn / read_log / system_info
                          ├── journal  query / list_boots / failed_units / coredumps / coredump_info / coredump_backtrace
-                         ├── desktop  get_tree / launch / sway_command / screenshot / key / type_text / pointer / clipboard / notify
+                         ├── desktop  get_tree / window / launch / screenshot / key / type_text / pointer / clipboard / notify …
+                         │            backend KDE (KWin scripting, spectacle, ydotool) o Sway (swaymsg, grim, wtype)
                          └── a11y     list_apps / tree / find / wait_for / action / focus / get_text / set_text / enable
 ```
 
@@ -29,7 +30,9 @@ crates/
   mcpd/         gateway: spawn, handshake, agregación de tools, routing, auto-restart, audit
   mcp-shell/    shell sin restricciones (as_root, user, cwd, stdin, timeout)
   mcp-journal/  journalctl / systemctl --failed / coredumpctl (+ backtrace con gdb)
-  mcp-desktop/  swaymsg IPC, grim, wtype, wl-clipboard, notify-send, puntero vía `seat cursor`
+  mcp-desktop/  dos backends elegidos según la sesión:
+                  kde.rs  + kwin.py  scripts de KWin por D-Bus (ventanas/escritorios), spectacle+imagemagick, ydotool
+                  sway.rs            swaymsg IPC, grim, wtype, puntero vía `seat cursor`
   mcp-a11y/     árbol de accesibilidad AT-SPI (helper Python con GObject Atspi embebido en el binario)
 iso/
   packages.extra   paquetes que se añaden a releng (sway, firefox, gdb, bpftrace, perf, nodejs…)
@@ -97,6 +100,14 @@ La primera vez (en un sistema instalado antes de que existiera el comando):
 git clone https://github.com/ernestoariasdiaz/mcpos.git ~/mcpos
 bash ~/mcpos/iso/airootfs/usr/local/sbin/mcpos-update
 ```
+
+### Escritorio
+
+Plasma 6 en Wayland es la sesión por defecto: autologin → Plasma → Konsole con `mcpos-agent` abierto solo.
+Para usar Sway: `echo sway > ~/.config/mcpos/session` y reinicia (`plasma` para volver).
+
+Teclado y ratón en KDE van por `ydotool` (`/dev/uinput`, servicio de usuario `mcpos-ydotoold`); KWin no permite `wtype`.
+El movimiento absoluto del ratón con ydotool puede desviarse por la aceleración del puntero: para clics fiables usa `a11y__action`.
 
 ### Probar sin ISO (en cualquier Linux con Sway)
 

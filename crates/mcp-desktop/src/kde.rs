@@ -1,0 +1,387 @@
+//! KDE Plasma (Wayland) backend:
+//!  - windows / virtual desktops: KWin scripting via the embedded kwin.py bridge
+//!  - screenshots: spectacle (+ imagemagick for crop/scale)
+//!  - keyboard / pointer: ydotool (uinput; KWin doesn't allow wtype)
+//!  - clipboard: wl-clipboard, klipper as fallback
+
+use mcp_core::json::{self, Value};
+use mcp_core::proc::{run, Output};
+use mcp_core::util::{base64, schema, truncate};
+use mcp_core::{ToolResult, Tools};
+use std::time::Duration;
+
+const T: Duration = Duration::from_secs(20);
+const KWIN_PY: &str = include_str!("kwin.py");
+
+fn out(r: Result<Output, String>) -> ToolResult {
+    match r {
+        Ok(o) if o.ok() => ToolResult::text(if o.stdout.trim().is_empty() { "ok".into() } else { o.stdout }),
+        Ok(o) => ToolResult::error(o.render(20_000)),
+        Err(e) => ToolResult::error(e),
+    }
+}
+
+/// Run an op in the KWin bridge and return its parsed JSON.
+fn kwin(op: &str, args: &Value) -> Result<Value, String> {
+    let mut req = match args { Value::Obj(_) => args.clone(), _ => Value::Obj(vec![]) };
+    req.set("op", op.into());
+    let python = std::env::var("MCP_DESKTOP_PYTHON").unwrap_or_else(|_| "python3".into());
+    let o = run(&python, &["-I", "-", &req.to_json()], Some(KWIN_PY.as_bytes()), T)?;
+    if o.timed_out {
+        return Err("KWin bridge timed out (KWin hung?)".into());
+    }
+    let line = o.stdout.lines().rev().find(|l| l.trim_start().starts_with('{')).unwrap_or("");
+    let v = json::parse(line).map_err(|_| format!("bridge failed: {}\n{}", o.stdout, o.stderr))?;
+    if let Some(e) = v.str_field("error") {
+        return Err(e.to_string());
+    }
+    Ok(v)
+}
+
+fn fmt_window(w: &Value) -> String {
+    format!(
+        "window id={} pid={} app={} title={:?} {}x{}+{}+{}{}{}{}",
+        w.str_field("id").unwrap_or("?"),
+        w.i64_field("pid").unwrap_or(0),
+        w.str_field("app").unwrap_or("?"),
+        w.str_field("caption").unwrap_or(""),
+        w.i64_field("w").unwrap_or(0),
+        w.i64_field("h").unwrap_or(0),
+        w.i64_field("x").unwrap_or(0),
+        w.i64_field("y").unwrap_or(0),
+        if w.bool_field("active").unwrap_or(false) { " *active*" } else { "" },
+        if w.bool_field("minimized").unwrap_or(false) { " minimized" } else { "" },
+        if w.bool_field("fullscreen").unwrap_or(false) { " fullscreen" } else { "" },
+    )
+}
+
+fn get_tree(a: &Value) -> ToolResult {
+    match kwin("list", &Value::Obj(vec![])) {
+        Err(e) => ToolResult::error(e),
+        Ok(v) if a.bool_field("raw").unwrap_or(false) => ToolResult::text(v.to_json()),
+        Ok(v) => {
+            let mut s = String::new();
+            for sc in v.get("screens").and_then(|x| x.as_array()).into_iter().flatten() {
+                s.push_str(&format!(
+                    "screen {} {}x{}+{}+{}\n",
+                    sc.str_field("name").unwrap_or("?"),
+                    sc.i64_field("w").unwrap_or(0), sc.i64_field("h").unwrap_or(0),
+                    sc.i64_field("x").unwrap_or(0), sc.i64_field("y").unwrap_or(0)
+                ));
+            }
+            let cur = v.str_field("current").unwrap_or("");
+            let desks: Vec<String> = v.get("desktops").and_then(|x| x.as_array()).into_iter().flatten()
+                .map(|d| {
+                    let n = d.str_field("name").unwrap_or("?");
+                    if n == cur { format!("{n} *current*") } else { n.to_string() }
+                })
+                .collect();
+            s.push_str(&format!("desktops: {}\n", desks.join(", ")));
+            for w in v.get("windows").and_then(|x| x.as_array()).into_iter().flatten() {
+                let d = w.get("desktops").and_then(|x| x.as_array()).map(|a| {
+                    a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(",")
+                }).unwrap_or_default();
+                s.push_str(&format!("  {} [{}]\n", fmt_window(w), if d.is_empty() { "all".into() } else { d }));
+            }
+            ToolResult::text(s)
+        }
+    }
+}
+
+fn window(a: &Value) -> ToolResult {
+    if a.str_field("id").is_none() || a.str_field("action").is_none() {
+        return ToolResult::error("need 'id' (window id, pid, or title/app substring) and 'action'");
+    }
+    match kwin("window", a) {
+        Ok(v) => ToolResult::text(format!(
+            "{}: {}",
+            v.str_field("action").unwrap_or("ok"),
+            v.get("window").map(fmt_window).unwrap_or_default()
+        )),
+        Err(e) => ToolResult::error(e),
+    }
+}
+
+fn screenshot(a: &Value) -> ToolResult {
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    let raw = format!("/tmp/mcp-shot-{ts}-raw.png");
+    let path = a.str_field("save_to").map(|s| s.to_string()).unwrap_or_else(|| format!("/tmp/mcp-shot-{ts}.png"));
+    let mode = if a.bool_field("active_window").unwrap_or(false) { "-a" } else { "-f" };
+    match run("spectacle", &["-b", "-n", mode, "-o", &raw], None, T) {
+        Ok(o) if o.ok() || std::path::Path::new(&raw).exists() => {}
+        r => return out(r),
+    }
+    // spectacle may return before the file is flushed
+    for _ in 0..40 {
+        if std::fs::metadata(&raw).map(|m| m.len() > 0).unwrap_or(false) { break; }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let scale = a.get("scale").and_then(|s| s.as_f64()).unwrap_or(0.5);
+    let mut args: Vec<String> = vec![raw.clone()];
+    if let Some(r) = a.str_field("region") {
+        // "X,Y WxH" -> WxH+X+Y
+        let geo = r.replace(' ', ",");
+        let p: Vec<&str> = geo.split([',', 'x']).filter(|s| !s.is_empty()).collect();
+        if p.len() == 4 {
+            args.push("-crop".into());
+            args.push(format!("{}x{}+{}+{}", p[2], p[3], p[0], p[1]));
+            args.push("+repage".into());
+        } else {
+            return ToolResult::error("region must be 'X,Y WxH'");
+        }
+    }
+    if (scale - 1.0).abs() > 1e-3 {
+        args.push("-resize".into());
+        args.push(format!("{}%", (scale * 100.0).round()));
+    }
+    args.push(path.clone());
+    let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let conv = run("magick", &argv, None, T);
+    let final_path = match conv {
+        Ok(o) if o.ok() => { let _ = std::fs::remove_file(&raw); path }
+        _ => raw, // no imagemagick: return the full-size capture
+    };
+    match std::fs::read(&final_path) {
+        Ok(b) => ToolResult::text(format!("saved {final_path} ({} bytes, scale {scale})", b.len())).with_image(base64(&b), "image/png"),
+        Err(e) => ToolResult::error(format!("read {final_path}: {e}")),
+    }
+}
+
+/// Linux input event codes for ydotool.
+fn keycode(name: &str) -> Option<u32> {
+    let n = name.to_lowercase();
+    let letters = "qwertyuiop"; // 16..25
+    if n.len() == 1 {
+        let c = n.chars().next().unwrap();
+        if let Some(i) = letters.find(c) { return Some(16 + i as u32); }
+        if let Some(i) = "asdfghjkl".find(c) { return Some(30 + i as u32); }
+        if let Some(i) = "zxcvbnm".find(c) { return Some(44 + i as u32); }
+        if let Some(i) = "1234567890".find(c) { return Some(2 + i as u32); }
+        return match c {
+            '-' => Some(12), '=' => Some(13), '[' => Some(26), ']' => Some(27), ';' => Some(39),
+            '\'' => Some(40), '`' => Some(41), '\\' => Some(43), ',' => Some(51), '.' => Some(52),
+            '/' => Some(53), ' ' => Some(57), _ => None,
+        };
+    }
+    if let Some(f) = n.strip_prefix('f').and_then(|x| x.parse::<u32>().ok()) {
+        return match f { 1..=10 => Some(58 + f), 11 => Some(87), 12 => Some(88), _ => None };
+    }
+    Some(match n.as_str() {
+        "escape" | "esc" => 1, "minus" => 12, "equal" => 13, "backspace" => 14, "tab" => 15,
+        "bracketleft" => 26, "bracketright" => 27, "return" | "enter" => 28, "semicolon" => 39,
+        "apostrophe" => 40, "grave" => 41, "backslash" => 43, "comma" => 51, "period" => 52,
+        "slash" => 53, "space" => 57, "caps_lock" => 58, "print" => 99, "home" => 102, "up" => 103,
+        "page_up" | "prior" => 104, "left" => 105, "right" => 106, "end" => 107, "down" => 108,
+        "page_down" | "next" => 109, "insert" => 110, "delete" => 111, "menu" => 127,
+        "ctrl" | "control" | "control_l" => 29, "shift" | "shift_l" => 42, "alt" | "alt_l" => 56,
+        "super" | "logo" | "win" | "meta" | "mod4" | "super_l" => 125, "altgr" | "alt_r" => 100,
+        "control_r" => 97, "shift_r" => 54,
+        _ => return None,
+    })
+}
+
+fn ydotool(args: &[&str]) -> Result<Output, String> {
+    let r = run("ydotool", args, None, T)?;
+    if !r.ok() && (r.stderr.contains("socket") || r.stderr.contains("ydotoold")) {
+        return Err(format!(
+            "ydotool can't reach ydotoold: {}\nfix: systemctl --user enable --now mcpos-ydotoold",
+            r.stderr.trim()
+        ));
+    }
+    Ok(r)
+}
+
+fn key(a: &Value) -> ToolResult {
+    let Some(combo) = a.str_field("keys") else { return ToolResult::error("missing 'keys'") };
+    let mut done = Vec::new();
+    for chord in combo.split_whitespace() {
+        let parts: Vec<&str> = chord.split('+').collect();
+        let mut codes = Vec::new();
+        for p in &parts {
+            match keycode(p) {
+                Some(c) => codes.push(c),
+                None => return ToolResult::error(format!("unknown key '{p}' in '{chord}'")),
+            }
+        }
+        let mut ev: Vec<String> = codes.iter().map(|c| format!("{c}:1")).collect();
+        ev.extend(codes.iter().rev().map(|c| format!("{c}:0")));
+        let mut argv = vec!["key"];
+        argv.extend(ev.iter().map(|s| s.as_str()));
+        match ydotool(&argv) {
+            Ok(o) if o.ok() => done.push(format!("sent {chord}")),
+            r => return out(r),
+        }
+    }
+    ToolResult::text(done.join("\n"))
+}
+
+fn type_text(a: &Value) -> ToolResult {
+    let Some(text) = a.str_field("text") else { return ToolResult::error("missing 'text'") };
+    if text.is_ascii() {
+        return match ydotool(&["type", "--key-delay", "4", "--", text]) {
+            Ok(o) if o.ok() => ToolResult::text(format!("typed {} chars", text.chars().count())),
+            r => out(r),
+        };
+    }
+    // ydotool only types US-ASCII: paste non-ASCII text through the clipboard instead
+    let paste = a.str_field("paste_keys").unwrap_or("ctrl+v");
+    let copy = run("sh", &["-c", "wl-copy -- \"$1\" >/dev/null 2>&1 </dev/null", "sh", text], None, T);
+    if !matches!(&copy, Ok(o) if o.ok()) {
+        return ToolResult::error("non-ASCII text needs wl-copy for the clipboard fallback");
+    }
+    std::thread::sleep(Duration::from_millis(150));
+    let mut k = Value::Obj(vec![]);
+    k.set("keys", paste.into());
+    let r = key(&k);
+    if r.is_error { return r; }
+    ToolResult::text(format!(
+        "non-ASCII text pasted via clipboard + {paste} (in Konsole use paste_keys='ctrl+shift+v')"
+    ))
+}
+
+fn pointer(a: &Value) -> ToolResult {
+    let mut done = Vec::new();
+    if let (Some(x), Some(y)) = (a.i64_field("x"), a.i64_field("y")) {
+        let (xs, ys) = (x.to_string(), y.to_string());
+        match ydotool(&["mousemove", "--absolute", "-x", &xs, "-y", &ys]) {
+            Ok(o) if o.ok() => done.push(format!("moved to {x},{y}")),
+            r => return out(r),
+        }
+    }
+    let clicks = a.i64_field("clicks").unwrap_or(1).clamp(1, 3).to_string();
+    let btn = a.str_field("button").unwrap_or("none");
+    let r = match btn {
+        "left" => Some(ydotool(&["click", "--repeat", &clicks, "0xC0"])),
+        "right" => Some(ydotool(&["click", "--repeat", &clicks, "0xC1"])),
+        "middle" => Some(ydotool(&["click", "--repeat", &clicks, "0xC2"])),
+        "scroll_up" => Some(ydotool(&["mousemove", "--wheel", "-x", "0", "-y", "1"])),
+        "scroll_down" => Some(ydotool(&["mousemove", "--wheel", "-x", "0", "-y", "-1"])),
+        _ => None,
+    };
+    if let Some(r) = r {
+        match r {
+            Ok(o) if o.ok() => done.push(format!("{btn} x{clicks}")),
+            r => return out(r),
+        }
+    }
+    if done.is_empty() { ToolResult::error("give x,y and/or button") } else { ToolResult::text(done.join(", ")) }
+}
+
+fn clipboard_get(_: &Value) -> ToolResult {
+    if let Ok(o) = run("wl-paste", &["--no-newline"], None, T) {
+        if o.ok() { return ToolResult::text(o.stdout); }
+    }
+    match run("busctl", &["--user", "call", "org.kde.klipper", "/klipper", "org.kde.klipper.klipper", "getClipboardContents"], None, T) {
+        Ok(o) if o.ok() => {
+            // busctl prints: s "text"
+            let t = o.stdout.trim().strip_prefix("s ").unwrap_or(o.stdout.trim());
+            ToolResult::text(json::parse(t).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_else(|| t.to_string()))
+        }
+        r => out(r),
+    }
+}
+
+fn launch(a: &Value) -> ToolResult {
+    let Some(c) = a.str_field("command") else { return ToolResult::error("missing 'command'") };
+    // detach from us so the app outlives this server
+    match run("sh", &["-c", "setsid -f sh -c \"$1\" >/dev/null 2>&1 </dev/null", "sh", c], None, T) {
+        Ok(o) if o.ok() => ToolResult::text(format!("launched: {c} (use get_tree or a11y__wait_for to see it)")),
+        r => out(r),
+    }
+}
+
+pub fn tools() -> Tools {
+    Tools::new()
+        .tool("get_tree", "Screens, virtual desktops and windows (id, pid, app, title, geometry, active/minimized). raw=true for JSON.",
+            schema(&[("raw", "boolean", "Return raw JSON")], &[]), get_tree)
+        .tool("window",
+            "Manage a window. id = window id from get_tree, a PID, or a title/app substring. \
+             action: activate | close | minimize | unminimize | maximize | unmaximize | fullscreen | keep_above | move (x,y,w,h) | to_desktop (desktop).",
+            schema(&[
+                ("id", "string", "Window id, pid or title/app substring"),
+                ("action", "string", "See description"),
+                ("x", "integer", "move: x"), ("y", "integer", "move: y"),
+                ("w", "integer", "move: width"), ("h", "integer", "move: height"),
+                ("desktop", "string", "to_desktop: name or number"),
+            ], &["id", "action"]), window)
+        .tool("switch_desktop", "Switch to a virtual desktop by name or number.",
+            schema(&[("desktop", "string", "Name or number")], &["desktop"]),
+            |a| match kwin("desktop", a) {
+                Ok(v) => ToolResult::text(format!("current desktop: {}", v.str_field("current").unwrap_or("?"))),
+                Err(e) => ToolResult::error(e),
+            })
+        .tool("get_outputs", "Monitors, modes and scale (kscreen-doctor).", schema(&[], &[]),
+            |_| match run("kscreen-doctor", &["-o"], None, T) {
+                // strip ANSI colors
+                Ok(o) if o.ok() => ToolResult::text(truncate(&strip_ansi(&o.stdout), 40_000)),
+                r => out(r),
+            })
+        .tool("set_output", "Change monitor settings via kscreen-doctor, e.g. 'output.Virtual-1.mode.1920x1080@60' or 'output.Virtual-1.scale.1.25'.",
+            schema(&[("setting", "string", "kscreen-doctor argument")], &["setting"]),
+            |a| match a.str_field("setting") { Some(s) => out(run("kscreen-doctor", &[s], None, T)), None => ToolResult::error("missing 'setting'") })
+        .tool("launch", "Launch an app detached from the agent, e.g. 'konsole', 'firefox', 'dolphin', 'kate'.",
+            schema(&[("command", "string", "Command line")], &["command"]), launch)
+        .tool("screenshot", "Capture the screen (or the active window, or a region 'X,Y WxH') and return it as an image.",
+            schema(&[
+                ("active_window", "boolean", "Only the active window"),
+                ("region", "string", "Crop 'X,Y WxH' (screen coords, e.g. from get_tree)"),
+                ("scale", "number", "Image scale (default 0.5)"),
+                ("save_to", "string", "PNG path"),
+            ], &[]), screenshot)
+        .tool("type_text", "Type text into the focused window (ydotool). Non-ASCII text is pasted through the clipboard.",
+            schema(&[("text", "string", "Text"), ("paste_keys", "string", "Paste shortcut for non-ASCII (default ctrl+v; Konsole: ctrl+shift+v)")], &["text"]),
+            type_text)
+        .tool("key", "Press key chords, space separated: 'Return', 'Escape', 'ctrl+l', 'alt+F4', 'ctrl+shift+t', 'super'.",
+            schema(&[("keys", "string", "Chord(s)")], &["keys"]), key)
+        .tool("pointer", "Move the pointer to absolute screen coords and/or click (left|middle|right|scroll_up|scroll_down).",
+            schema(&[
+                ("x", "integer", "X"), ("y", "integer", "Y"),
+                ("button", "string", "left|middle|right|scroll_up|scroll_down"),
+                ("clicks", "integer", "1-3 (default 1)"),
+            ], &[]), pointer)
+        .tool("clipboard_get", "Read the clipboard as text.", schema(&[], &[]), clipboard_get)
+        .tool("clipboard_set", "Set the clipboard.", schema(&[("text", "string", "Text")], &["text"]),
+            |a| match a.str_field("text") {
+                Some(t) => out(run("sh", &["-c", "wl-copy -- \"$1\" >/dev/null 2>&1 </dev/null", "sh", t], None, T)),
+                None => ToolResult::error("missing 'text'"),
+            })
+        .tool("notify", "Show a desktop notification.", schema(&[("summary", "string", "Title"), ("body", "string", "Body")], &["summary"]),
+            |a| out(run("notify-send", &["--app-name=mcpOS", a.str_field("summary").unwrap_or("mcpOS"), a.str_field("body").unwrap_or("")], None, T)))
+}
+
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\u{1b}' {
+            if it.peek() == Some(&'[') {
+                it.next();
+                for d in it.by_ref() { if d.is_ascii_alphabetic() { break; } }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn keycodes() {
+        assert_eq!(keycode("a"), Some(30));
+        assert_eq!(keycode("L"), Some(38));
+        assert_eq!(keycode("ctrl"), Some(29));
+        assert_eq!(keycode("Return"), Some(28));
+        assert_eq!(keycode("F4"), Some(62));
+        assert_eq!(keycode("F12"), Some(88));
+        assert_eq!(keycode("m"), Some(50));
+        assert_eq!(keycode("0"), Some(11));
+        assert_eq!(keycode("nope"), None);
+    }
+    #[test]
+    fn ansi() {
+        assert_eq!(strip_ansi("\u{1b}[01;32mOutput\u{1b}[0m 1"), "Output 1");
+    }
+}

@@ -1,6 +1,6 @@
 include /etc/sway/config
 output * bg #11161d solid_color
 exec mako
-exec sh -c 'sleep 2; notify-send "mcpOS" "Abre una terminal (Super+Enter) y ejecuta: mcpos-agent"'
+exec sh -c 'sleep 2; notify-send "mcpOS" "Super+Enter abre terminal; ejecuta mcpos-agent"'
 # VMware: clipboard/resize helper
 exec vmware-user-suid-wrapper

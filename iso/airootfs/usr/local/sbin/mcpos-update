@@ -60,6 +60,21 @@ sudo install -m440 "$OV/etc/sudoers.d/10-mcp" /etc/sudoers.d/10-mcp
 sudo install -Dm644 "$OV/etc/sysctl.d/90-mcpos-debug.conf" /etc/sysctl.d/90-mcpos-debug.conf
 sudo sysctl -q --system || true
 sudo cp -r "$OV/etc/skel/." /etc/skel/
+sudo install -Dm644 "$OV/etc/udev/rules.d/80-mcpos-uinput.rules" /etc/udev/rules.d/80-mcpos-uinput.rules
+sudo install -Dm644 "$OV/etc/modules-load.d/mcpos-uinput.conf" /etc/modules-load.d/mcpos-uinput.conf
+sudo install -Dm644 "$OV/etc/systemd/user/mcpos-ydotoold.service" /etc/systemd/user/mcpos-ydotoold.service
+sudo modprobe uinput || true
+sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput || true
+sudo systemctl --global enable mcpos-ydotoold.service >/dev/null 2>&1 || true
+systemctl --user daemon-reload || true
+systemctl --user enable --now mcpos-ydotoold.service 2>/dev/null || echo "  (ydotoold arrancará en el próximo login)"
+
+say "Configuración KDE de $USER (solo si no existe; no pisa tus ajustes)"
+for f in .config/mcpos/session .config/autostart/mcpos-agent.desktop .config/kscreenlockerrc .config/powerdevilrc .config/kdeglobals; do
+    [[ -e $HOME/$f ]] && continue
+    install -Dm644 "$OV/etc/skel/$f" "$HOME/$f"
+    echo "  + $f"
+done
 
 say "Dotfiles de $USER (copia de seguridad *.bak si cambian)"
 for f in .bash_profile .bashrc .config/sway/config .mcp.json; do
@@ -75,5 +90,6 @@ cat <<EOF
 
 $(printf '\e[1;32m')mcpOS actualizado.$(printf '\e[0m')
   - En Claude Code: /mcp → mcpd → Reconnect  (o reinicia mcpos-agent) para cargar las tools nuevas
-  - Si cambió .bash_profile (variables de accesibilidad): cierra sesión de Sway (Super+Shift+e) o reinicia
+  - Si cambió .bash_profile (sesión/escritorio): reinicia con  sudo reboot
+  - Escritorio: Plasma por defecto; para volver a Sway:  echo sway > ~/.config/mcpos/session
 EOF
