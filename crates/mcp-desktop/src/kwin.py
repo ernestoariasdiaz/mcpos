@@ -77,6 +77,8 @@ else {
   else if (a === "unmaximize") { w.setMaximize(false, false); }
   else if (a === "fullscreen") { w.fullScreen = !w.fullScreen; }
   else if (a === "keep_above") { w.keepAbove = !w.keepAbove; }
+  else if (a === "above_on") { if (w.minimized) w.minimized = false; w.keepAbove = true; workspace.activeWindow = w; }
+  else if (a === "above_off") { w.keepAbove = false; }
   else if (a === "move") {
     var g = w.frameGeometry;
     w.frameGeometry = { x: ARGS.x !== undefined ? ARGS.x : g.x, y: ARGS.y !== undefined ? ARGS.y : g.y,

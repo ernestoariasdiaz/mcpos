@@ -11,6 +11,7 @@ use mcp_core::{ToolResult, Tools};
 use std::time::Duration;
 
 const T: Duration = Duration::from_secs(20);
+const SHOT_T: Duration = Duration::from_secs(45);
 const KWIN_PY: &str = include_str!("kwin.py");
 
 fn out(r: Result<Output, String>) -> ToolResult {
@@ -102,23 +103,71 @@ fn window(a: &Value) -> ToolResult {
     }
 }
 
+fn capture(mode: &str, raw: &str) -> Result<(), String> {
+    // Spectacle is single-instance: if one is already open (e.g. the user is selecting a region),
+    // our `spectacle -b` is forwarded to it and waits. Never kill it — it may be the user's.
+    if run("pgrep", &["-x", "spectacle"], None, T).map(|o| o.ok()).unwrap_or(false) {
+        return Err("Spectacle is already open (probably by the user, e.g. selecting a region). \
+                    Ask them to finish or close it, then retry."
+            .into());
+    }
+    let _ = std::fs::remove_file(raw);
+    let o = run("spectacle", &["-b", "-n", mode, "-o", raw], None, SHOT_T)?;
+    for _ in 0..50 {
+        if std::fs::metadata(raw).map(|m| m.len() > 0).unwrap_or(false) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(if o.timed_out {
+        format!("spectacle timed out after {}s", SHOT_T.as_secs())
+    } else {
+        format!("spectacle produced no file: {}", o.render(2000))
+    })
+}
+
 fn screenshot(a: &Value) -> ToolResult {
     let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
     let raw = format!("/tmp/mcp-shot-{ts}-raw.png");
     let path = a.str_field("save_to").map(|s| s.to_string()).unwrap_or_else(|| format!("/tmp/mcp-shot-{ts}.png"));
-    let mode = if a.bool_field("active_window").unwrap_or(false) { "-a" } else { "-f" };
-    match run("spectacle", &["-b", "-n", mode, "-o", &raw], None, T) {
-        Ok(o) if o.ok() || std::path::Path::new(&raw).exists() => {}
-        r => return out(r),
+
+    // window=<id|title|app>: keep it above everything during the capture, then crop to its frame,
+    // so it doesn't matter which window has focus (e.g. the agent's own terminal)
+    let mut crop: Option<String> = a.str_field("region").map(String::from);
+    let mut pinned: Option<String> = None;
+    if let Some(wid) = a.str_field("window") {
+        let mut req = Value::Obj(vec![]);
+        req.set("id", wid.into());
+        req.set("action", "above_on".into());
+        match kwin("window", &req) {
+            Ok(v) => {
+                let w = v.get("window").cloned().unwrap_or(Value::Null);
+                crop = Some(format!(
+                    "{},{} {}x{}",
+                    w.i64_field("x").unwrap_or(0).max(0), w.i64_field("y").unwrap_or(0).max(0),
+                    w.i64_field("w").unwrap_or(0), w.i64_field("h").unwrap_or(0)
+                ));
+                pinned = Some(wid.to_string());
+                std::thread::sleep(Duration::from_millis(350)); // let KWin repaint
+            }
+            Err(e) => return ToolResult::error(format!("window '{wid}': {e}")),
+        }
     }
-    // spectacle may return before the file is flushed
-    for _ in 0..40 {
-        if std::fs::metadata(&raw).map(|m| m.len() > 0).unwrap_or(false) { break; }
-        std::thread::sleep(Duration::from_millis(100));
+    let mode = if a.bool_field("active_window").unwrap_or(false) && pinned.is_none() { "-a" } else { "-f" };
+    let shot = capture(mode, &raw);
+    if let Some(wid) = &pinned {
+        let mut req = Value::Obj(vec![]);
+        req.set("id", wid.as_str().into());
+        req.set("action", "above_off".into());
+        let _ = kwin("window", &req);
     }
+    if let Err(e) = shot {
+        return ToolResult::error(e);
+    }
+
     let scale = a.get("scale").and_then(|s| s.as_f64()).unwrap_or(0.5);
     let mut args: Vec<String> = vec![raw.clone()];
-    if let Some(r) = a.str_field("region") {
+    if let Some(r) = crop {
         // "X,Y WxH" -> WxH+X+Y
         let geo = r.replace(' ', ",");
         let p: Vec<&str> = geo.split([',', 'x']).filter(|s| !s.is_empty()).collect();
@@ -136,8 +185,7 @@ fn screenshot(a: &Value) -> ToolResult {
     }
     args.push(path.clone());
     let argv: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let conv = run("magick", &argv, None, T);
-    let final_path = match conv {
+    let final_path = match run("magick", &argv, None, T) {
         Ok(o) if o.ok() => { let _ = std::fs::remove_file(&raw); path }
         _ => raw, // no imagemagick: return the full-size capture
     };
@@ -321,8 +369,11 @@ pub fn tools() -> Tools {
             |a| match a.str_field("setting") { Some(s) => out(run("kscreen-doctor", &[s], None, T)), None => ToolResult::error("missing 'setting'") })
         .tool("launch", "Launch an app detached from the agent, e.g. 'konsole', 'firefox', 'dolphin', 'kate'.",
             schema(&[("command", "string", "Command line")], &["command"]), launch)
-        .tool("screenshot", "Capture the screen (or the active window, or a region 'X,Y WxH') and return it as an image.",
+        .tool("screenshot",
+            "Capture the screen and return it as an image. window=<id|title|app> pins that window on top during the capture \
+             and crops to it (reliable even if another window has focus). Or region 'X,Y WxH'. Fails fast if the user has Spectacle open.",
             schema(&[
+                ("window", "string", "Window id, pid or title/app substring to capture"),
                 ("active_window", "boolean", "Only the active window"),
                 ("region", "string", "Crop 'X,Y WxH' (screen coords, e.g. from get_tree)"),
                 ("scale", "number", "Image scale (default 0.5)"),
