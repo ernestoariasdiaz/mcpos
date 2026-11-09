@@ -86,10 +86,23 @@ for f in .bash_profile .bashrc .config/sway/config .mcp.json; do
     echo "  $f actualizado"
 done
 
+# mcpd keeps its children running with the old binaries: stop them so the next call respawns the new ones.
+# Skip any server that is our own ancestor (e.g. this update was launched by the agent via shell__exec).
+ancestors=" "; p=$$
+while [[ $p -gt 1 ]]; do ancestors+="$p "; p=$(awk '{print $4}' /proc/$p/stat 2>/dev/null || echo 1); done
+restarted=()
+for srv in mcp-desktop mcp-a11y mcp-journal mcp-shell; do
+    for pid in $(pgrep -u "$USER" -x "$srv" 2>/dev/null); do
+        [[ $ancestors == *" $pid "* ]] && { echo "  ($srv pid $pid ejecuta esta actualización: se reinicia luego con mcpd__restart)"; continue; }
+        kill "$pid" 2>/dev/null && restarted+=("$srv")
+    done
+done
+((${#restarted[@]})) && say "Servidores reiniciados con los binarios nuevos: ${restarted[*]}"
+
 cat <<EOF
 
 $(printf '\e[1;32m')mcpOS actualizado.$(printf '\e[0m')
-  - En Claude Code: /mcp → mcpd → Reconnect  (o reinicia mcpos-agent) para cargar las tools nuevas
+  - Los servidores ya se reiniciaron; si cambió la lista de tools: /mcp → mcpd → Reconnect
   - Si cambió .bash_profile (sesión/escritorio): reinicia con  sudo reboot
   - Escritorio: Plasma por defecto; para volver a Sway:  echo sway > ~/.config/mcpos/session
 EOF

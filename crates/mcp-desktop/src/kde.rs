@@ -287,13 +287,97 @@ fn type_text(a: &Value) -> ToolResult {
     ))
 }
 
+/// Quoted strings from busctl output, e.g. `as 2 "event0" "event1"` -> ["event0","event1"].
+fn busctl_strings(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur: Option<String> = None;
+    let mut esc = false;
+    for ch in s.chars() {
+        match (&mut cur, ch) {
+            (None, '"') => cur = Some(String::new()),
+            (Some(_), '\\') if !esc => esc = true,
+            (Some(c), '"') if !esc => { out.push(std::mem::take(c)); cur = None; }
+            (Some(c), x) => { c.push(x); esc = false; }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Make KWin treat ydotool's virtual pointer linearly (flat profile, neutral speed),
+/// so absolute moves land where they should. Done once per process, best effort.
+fn ensure_flat_pointer() -> String {
+    static DONE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DONE.get_or_init(|| {
+        let bus = |args: &[&str]| run("busctl", args, None, T).ok().filter(|o| o.ok()).map(|o| o.stdout);
+        let Some(list) = bus(&["--user", "get-property", "org.kde.KWin", "/org/kde/KWin/InputDevice",
+                               "org.kde.KWin.InputDeviceManager", "devicesSysNames"]) else {
+            return "could not list KWin input devices".into();
+        };
+        let mut done = Vec::new();
+        for dev in busctl_strings(&list) {
+            let path = format!("/org/kde/KWin/InputDevice/{dev}");
+            let name = bus(&["--user", "get-property", "org.kde.KWin", &path, "org.kde.KWin.InputDevice", "name"])
+                .map(|n| busctl_strings(&n).join("")).unwrap_or_default();
+            if !name.to_lowercase().contains("ydotool") { continue; }
+            let _ = bus(&["--user", "set-property", "org.kde.KWin", &path, "org.kde.KWin.InputDevice",
+                          "pointerAccelerationProfileFlat", "b", "true"]);
+            let _ = bus(&["--user", "set-property", "org.kde.KWin", &path, "org.kde.KWin.InputDevice",
+                          "pointerAcceleration", "d", "0"]);
+            done.push(format!("{dev} ({name})"));
+        }
+        if done.is_empty() { "ydotool device not found in KWin yet".into() } else { format!("flat accel on {}", done.join(", ")) }
+    }).clone()
+}
+
+fn cursor_pos() -> Option<(i64, i64)> {
+    let v = kwin("cursor", &Value::Obj(vec![])).ok()?;
+    Some((v.i64_field("x")?, v.i64_field("y")?))
+}
+
+/// Move to (x,y) and verify against KWin's real cursor, correcting with a measured gain per axis
+/// (handles residual pointer acceleration). Returns Ok(note) when within 2 px.
+fn move_verified(x: i64, y: i64) -> Result<String, String> {
+    let accel = ensure_flat_pointer();
+    let (xs, ys) = (x.to_string(), y.to_string());
+    match ydotool(&["mousemove", "--absolute", "-x", &xs, "-y", &ys]) {
+        Ok(o) if o.ok() => {}
+        Ok(o) => return Err(o.render(2000)),
+        Err(e) => return Err(e),
+    }
+    let (mut gx, mut gy) = (1.0f64, 1.0f64);
+    let mut last: Option<(i64, i64, i64, i64)> = None; // (pos before, commanded) of the previous correction
+    for i in 0..8 {
+        std::thread::sleep(Duration::from_millis(60));
+        let Some((cx, cy)) = cursor_pos() else {
+            return Ok(format!("moved (unverified: KWin cursor not readable); {accel}"));
+        };
+        if let Some((px, py, cmx, cmy)) = last {
+            // learn the effective gain from what the last correction actually did
+            if cmx.abs() >= 3 { let g = (cx - px) as f64 / cmx as f64; if g > 0.2 && g < 5.0 { gx = g; } }
+            if cmy.abs() >= 3 { let g = (cy - py) as f64 / cmy as f64; if g > 0.2 && g < 5.0 { gy = g; } }
+        }
+        let (ex, ey) = (x - cx, y - cy);
+        if ex.abs() <= 2 && ey.abs() <= 2 {
+            return Ok(format!("verified at {cx},{cy} after {i} correction(s); {accel}"));
+        }
+        let (cmx, cmy) = ((ex as f64 / gx).round() as i64, (ey as f64 / gy).round() as i64);
+        let (a1, a2) = (cmx.to_string(), cmy.to_string());
+        if !matches!(ydotool(&["mousemove", "-x", &a1, "-y", &a2]), Ok(ref o) if o.ok()) { break; }
+        last = Some((cx, cy, cmx, cmy));
+    }
+    let (cx, cy) = cursor_pos().unwrap_or((-1, -1));
+    Err(format!("pointer did not reach {x},{y} (ended at {cx},{cy}); {accel}. \
+                 Prefer a11y__action for clicking UI elements."))
+}
+
 fn pointer(a: &Value) -> ToolResult {
     let mut done = Vec::new();
     if let (Some(x), Some(y)) = (a.i64_field("x"), a.i64_field("y")) {
-        let (xs, ys) = (x.to_string(), y.to_string());
-        match ydotool(&["mousemove", "--absolute", "-x", &xs, "-y", &ys]) {
-            Ok(o) if o.ok() => done.push(format!("moved to {x},{y}")),
-            r => return out(r),
+        match move_verified(x, y) {
+            Ok(note) => done.push(format!("moved to {x},{y} — {note}")),
+            // never click somewhere we didn't mean to
+            Err(e) => return ToolResult::error(format!("{e}\nno click was sent")),
         }
     }
     let clicks = a.i64_field("clicks").unwrap_or(1).clamp(1, 3).to_string();
@@ -384,7 +468,7 @@ pub fn tools() -> Tools {
             type_text)
         .tool("key", "Press key chords, space separated: 'Return', 'Escape', 'ctrl+l', 'alt+F4', 'ctrl+shift+t', 'super'.",
             schema(&[("keys", "string", "Chord(s)")], &["keys"]), key)
-        .tool("pointer", "Move the pointer to absolute screen coords and/or click (left|middle|right|scroll_up|scroll_down).",
+        .tool("pointer", "Move the pointer to absolute screen coords (verified against KWin's real cursor and corrected) and/or click (left|middle|right|scroll_up|scroll_down).",
             schema(&[
                 ("x", "integer", "X"), ("y", "integer", "Y"),
                 ("button", "string", "left|middle|right|scroll_up|scroll_down"),
@@ -430,6 +514,11 @@ mod tests {
         assert_eq!(keycode("m"), Some(50));
         assert_eq!(keycode("0"), Some(11));
         assert_eq!(keycode("nope"), None);
+    }
+    #[test]
+    fn busctl_parse() {
+        assert_eq!(busctl_strings(r#"as 3 "event0" "event1" "event12""#), vec!["event0", "event1", "event12"]);
+        assert_eq!(busctl_strings(r#"s "ydotoold virtual device""#), vec!["ydotoold virtual device"]);
     }
     #[test]
     fn ansi() {

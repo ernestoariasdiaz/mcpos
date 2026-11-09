@@ -92,6 +92,10 @@ else {
   if (a) send({ ok: true, action: a, window: W(w) });
 }
 """,
+    "cursor": r"""
+var c = workspace.cursorPos;
+send({ x: Math.round(c.x), y: Math.round(c.y) });
+""",
     "desktop": r"""
 var d = workspace.desktops.filter(function (x) { return x.name === ARGS.desktop || String(x.x11DesktopNumber) === String(ARGS.desktop); })[0];
 if (!d) send({ error: "no desktop " + ARGS.desktop });

@@ -37,6 +37,7 @@ ttf-dejavu
 firefox
 # bug hunting
 gdb
+debuginfod
 strace
 ltrace
 bpftrace

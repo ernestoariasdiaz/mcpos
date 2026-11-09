@@ -21,6 +21,15 @@ fn sysrun(argv: &[&str], timeout_s: u64) -> ToolResult {
     }
 }
 
+/// gdb backtrace with symbols from Arch's debuginfod. `env` is used because sudo drops the variable.
+fn backtrace(m: &str) -> ToolResult {
+    let urls = std::env::var("DEBUGINFOD_URLS").unwrap_or_else(|_| "https://debuginfod.archlinux.org".into());
+    let env_kv = format!("DEBUGINFOD_URLS={urls}");
+    let gdb_args = "--debugger-arguments=-batch -iex 'set debuginfod enabled on' -ex 'thread apply all bt full'";
+    let argv = ["env", env_kv.as_str(), "coredumpctl", "debug", "--no-pager", m, gdb_args];
+    sysrun(&argv, 600)
+}
+
 fn query(a: &Value) -> ToolResult {
     let mut v: Vec<String> = vec!["journalctl".into(), "--no-pager".into(), "-o".into()];
     v.push(a.str_field("output").unwrap_or("short-iso-precise").into());
@@ -99,13 +108,11 @@ fn main() {
         )
         .tool(
             "coredump_backtrace",
-            "Full gdb backtrace (all threads) of the latest crash matching 'match'. Needs gdb.",
+            "Full gdb backtrace (all threads) of the latest crash matching 'match'. Debug symbols are fetched \
+             automatically from debuginfod.archlinux.org (first run for a big app can take a few minutes).",
             schema(&[("match", "string", "PID, COMM or exe path")], &["match"]),
             |a| match a.str_field("match") {
-                Some(m) => sysrun(
-                    &["coredumpctl", "debug", "--no-pager", m, "--debugger-arguments=-batch -ex 'thread apply all bt full'"],
-                    180,
-                ),
+                Some(m) => backtrace(m),
                 None => ToolResult::error("missing 'match'"),
             },
         );

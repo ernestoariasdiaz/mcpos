@@ -107,7 +107,7 @@ Plasma 6 en Wayland es la sesión por defecto: autologin → Plasma → Konsole 
 Para usar Sway: `echo sway > ~/.config/mcpos/session` y reinicia (`plasma` para volver).
 
 Teclado y ratón en KDE van por `ydotool` (`/dev/uinput`, servicio de usuario `mcpos-ydotoold`); KWin no permite `wtype`.
-El movimiento absoluto del ratón con ydotool puede desviarse por la aceleración del puntero: para clics fiables usa `a11y__action`.
+`desktop__pointer` pone el dispositivo de ydotool en aceleración plana (API InputDevice de KWin) y verifica la posición contra el cursor real de KWin, corrigiendo con la ganancia medida; si no llega a ±2 px devuelve error y **no hace clic**. Aun así, para pulsar botones `a11y__action` es lo más fiable.
 
 ### Probar sin ISO (en cualquier Linux con Sway)
 
