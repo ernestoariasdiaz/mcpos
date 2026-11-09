@@ -7,6 +7,7 @@
 #
 # Env: TZ_NAME (default America/Santo_Domingo), HOSTNAME_NEW (default mcpos), KEEP_HOME=0 to skip copying /home/mcp
 set -euo pipefail
+trap 'printf "\e[1;31merror:\e[0m falló la línea %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 TZ_NAME="${TZ_NAME:-America/Santo_Domingo}"
 HOSTNAME_NEW="${HOSTNAME_NEW:-mcpos}"
@@ -27,6 +28,7 @@ if [[ -z $DISK ]]; then
     exit 0
 fi
 [[ -b $DISK ]] || die "$DISK no es un dispositivo de bloque"
+if mountpoint -q "$MNT"; then say "Desmontando $MNT de un intento anterior"; umount -R "$MNT"; fi
 if findmnt -rno SOURCE | grep -q "^$DISK"; then die "$DISK tiene particiones montadas"; fi
 
 if [[ ${2:-} != --yes ]]; then
@@ -65,9 +67,11 @@ mount "$ESP" "$MNT/boot"
 
 say "Lista de paquetes (los mismos de la ISO, sin los propios del live)"
 SKIP='^(mkinitcpio-archiso|syslinux|memtest86\+|memtest86\+-efi|edk2-shell|grub|refind|archinstall|pv)$'
-mapfile -t PKGS < <(pacman -Qqen | grep -Ev "$SKIP")
+# -Qqe (not -Qqen): the live system has no sync DBs, so -n would filter out everything
+mapfile -t PKGS < <(pacman -Qqe | grep -Ev "$SKIP")
 PKGS+=(base linux linux-firmware btrfs-progs dosfstools efibootmgr sudo)
-echo "${#PKGS[@]} paquetes"
+echo "${#PKGS[@]} paquetes explícitos"
+(( ${#PKGS[@]} > 100 )) || die "lista de paquetes sospechosamente corta (${#PKGS[@]}); abortando"
 
 say "pacstrap (descarga ~2 GB, paciencia)"
 pacstrap -K "$MNT" "${PKGS[@]}"
@@ -135,7 +139,6 @@ passwd -d root >/dev/null
 systemctl enable systemd-networkd systemd-resolved systemd-timesyncd >/dev/null
 systemctl is-enabled vmtoolsd >/dev/null 2>&1 || systemctl enable vmtoolsd vmware-vmblock-fuse >/dev/null 2>&1 || true
 systemctl enable qemu-guest-agent >/dev/null 2>&1 || true
-ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 
 bootctl install >/dev/null
 cat > /boot/loader/loader.conf <<EOF
@@ -157,6 +160,9 @@ options root=UUID=$ROOT_UUID rootflags=subvol=@ rw
 EOF
 mkinitcpio -P >/dev/null
 CHROOT
+
+# outside the chroot: inside it /etc/resolv.conf is a bind mount
+ln -sf ../run/systemd/resolve/stub-resolv.conf "$MNT/etc/resolv.conf"
 
 if [[ $KEEP_HOME == 1 && -d /home/mcp ]]; then
     say "Copiando /home/mcp del live (Claude Code y su login incluidos)"
