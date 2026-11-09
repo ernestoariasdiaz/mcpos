@@ -1,0 +1,2 @@
+# mcpOS test image: the agent user has passwordless root. Do NOT ship this outside a VM.
+mcp ALL=(ALL:ALL) NOPASSWD: ALL

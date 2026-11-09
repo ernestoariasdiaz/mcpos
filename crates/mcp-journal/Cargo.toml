@@ -1,0 +1,8 @@
+[package]
+name = "mcp-journal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mcp-core = { path = "../mcp-core" }

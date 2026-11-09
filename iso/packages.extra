@@ -1,0 +1,41 @@
+# --- mcpOS additions on top of releng ---
+# desktop
+sway
+swaybg
+swayidle
+foot
+mako
+grim
+slurp
+wtype
+wl-clipboard
+libnotify
+xdg-desktop-portal-wlr
+xorg-xwayland
+polkit
+mesa
+noto-fonts
+noto-fonts-emoji
+ttf-dejavu
+firefox
+# bug hunting
+gdb
+strace
+ltrace
+bpftrace
+perf
+valgrind
+lsof
+htop
+# tooling for the agent
+sudo
+git
+jq
+nodejs
+npm
+python
+at-spi2-core
+python-atspi
+# vm guest
+qemu-guest-agent
+spice-vdagent

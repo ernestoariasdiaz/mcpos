@@ -1,0 +1,4 @@
+include /etc/sway/config
+output * bg #11161d solid_color
+exec mako
+exec sh -c 'sleep 2; notify-send "mcpOS" "Abre una terminal (Super+Enter) y ejecuta: mcpos-agent"'

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Create the live 'mcp' user on first boot (runs before getty@tty1).
+set -e
+if ! id mcp >/dev/null 2>&1; then
+    useradd -m -s /bin/bash -G wheel,video,input,audio,systemd-journal mcp
+    passwd -d mcp
+fi

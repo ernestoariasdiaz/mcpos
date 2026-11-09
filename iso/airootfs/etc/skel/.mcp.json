@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "mcpd": { "command": "/usr/local/bin/mcpd", "args": [] }
+  }
+}
