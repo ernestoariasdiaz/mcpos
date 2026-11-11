@@ -6,6 +6,12 @@ konsole
 dolphin
 kate
 spectacle
+# apps to explore / test (mcp-explore)
+kcalc
+kwrite
+okular
+gwenview
+ark
 kscreen
 plasma-nm
 plasma-pa

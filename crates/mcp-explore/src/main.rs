@@ -80,6 +80,16 @@ fn load_findings(dir: &Path) -> Vec<Value> {
 
 fn start(a: &Value) -> ToolResult {
     let Some(app) = a.str_field("app") else { return ToolResult::error("missing 'app' (command line, e.g. 'kate -n' or 'dolphin --new-window')") };
+    // fail fast if the program isn't installed (the explorer would otherwise die in the background)
+    let prog = app.split_whitespace().next().unwrap_or("");
+    let found = mcp_core::proc::run("sh", &["-c", "command -v -- \"$1\"", "sh", prog], None, Duration::from_secs(5))
+        .map(|o| o.ok()).unwrap_or(false);
+    if !found {
+        return ToolResult::error(format!(
+            "'{prog}' is not installed. Install it first, e.g. shell__exec(command=\"pacman -S --noconfirm {prog}\", as_root=true), \
+             or pick an installed app: konsole, dolphin --new-window, kate -n, kcalc, kwrite, okular, gwenview, ark"
+        ));
+    }
     let minutes = a.get("minutes").and_then(|v| v.as_f64()).unwrap_or(10.0).clamp(0.2, 24.0 * 60.0);
     let slug: String = app.split_whitespace().next().unwrap_or("app").chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
