@@ -91,8 +91,10 @@ done
 ancestors=" "; p=$$
 while [[ $p -gt 1 ]]; do ancestors+="$p "; p=$(awk '{print $4}' /proc/$p/stat 2>/dev/null || echo 1); done
 restarted=()
-for srv in mcp-desktop mcp-a11y mcp-journal mcp-shell; do
+for srv in mcp-desktop mcp-a11y mcp-explore mcp-journal mcp-shell; do
     for pid in $(pgrep -u "$USER" -x "$srv" 2>/dev/null); do
+        # background explorations ("mcp-explore run DIR") keep running across updates
+        [[ $(tr '\0' ' ' < /proc/$pid/cmdline 2>/dev/null) == *" run "* ]] && continue
         [[ $ancestors == *" $pid "* ]] && { echo "  ($srv pid $pid ejecuta esta actualización: se reinicia luego con mcpd__restart)"; continue; }
         kill "$pid" 2>/dev/null && restarted+=("$srv")
     done

@@ -12,7 +12,8 @@ Claude Code ──stdio──► mcpd (gateway, audit log)
                          ├── journal  query / list_boots / failed_units / coredumps / coredump_info / coredump_backtrace
                          ├── desktop  get_tree / window / launch / screenshot / key / type_text / pointer / clipboard / notify …
                          │            backend KDE (KWin scripting, spectacle, ydotool) o Sway (swaymsg, grim, wtype)
-                         └── a11y     list_apps / tree / find / wait_for / action / focus / get_text / set_text / enable
+                         ├── a11y     list_apps / tree / find / wait_for / action / focus / get_text / set_text / enable
+                         └── explore  start / status / runs / stop / findings / finding / replay   (exploración sin tokens)
 ```
 
 - Las tools se exponen como `<servidor>__<tool>` (p. ej. `shell__exec`, `desktop__screenshot`).
@@ -34,6 +35,7 @@ crates/
                   kde.rs  + kwin.py  scripts de KWin por D-Bus (ventanas/escritorios), spectacle+imagemagick, ydotool
                   sway.rs            swaymsg IPC, grim, wtype, puntero vía `seat cursor`
   mcp-a11y/     árbol de accesibilidad AT-SPI (helper Python con GObject Atspi embebido en el binario)
+  mcp-explore/  explorador sin tokens: UCB por novedad sobre el árbol a11y + oráculo (crash/cuelgue/exit/log)
 iso/
   packages.extra   paquetes que se añaden a releng (sway, firefox, gdb, bpftrace, perf, nodejs…)
   airootfs/        overlay: usuario mcp, autologin → sway, sudoers, sysctl de debug, coredumps, .mcp.json
@@ -99,6 +101,32 @@ La primera vez (en un sistema instalado antes de que existiera el comando):
 ```bash
 git clone https://github.com/ernestoariasdiaz/mcpos.git ~/mcpos
 bash ~/mcpos/iso/airootfs/usr/local/sbin/mcpos-update
+```
+
+### Exploración sin tokens (`explore__*`)
+
+Inspirado en AlphaZero y en el primer ANIMUS (curiosidad pura en Pokémon Azul): un explorador en Rust recorre
+el árbol de accesibilidad de una app eligiendo acciones que llevan a **estados nuevos** (UCB), mete texto
+"fuzz" en los campos y vigila un oráculo que no cuesta tokens:
+
+| Señal | Cómo se detecta | Firma para deduplicar |
+|---|---|---|
+| crash | la app muere por señal → `coredumpctl` + gdb con debuginfod | 5 funciones superiores de la pila |
+| cuelgue | AT-SPI no responde en 15 s → `gdb -p` en vivo | pila de todos los hilos |
+| exit ≠ 0 | estado de salida | código |
+| log-error | `journalctl -p err _PID=…` | mensaje normalizado (sin números ni direcciones) |
+
+- El **estado** es un hash de la estructura visible (roles + nombres normalizados), sin relojes ni contenido:
+  así un timestamp no cuenta como "estado nuevo" (la lección de Phantom Nodes).
+- Nunca pulsa acciones destructivas o de salida (borrar, papelera, salir, cerrar sesión…; ampliable con `deny`)
+  y la app corre con un `HOME` desechable.
+- Cada hallazgo guarda los pasos del episodio; `explore__replay` los repite en una instancia limpia.
+- Las corridas siguen vivas aunque `mcpd` o `mcpos-update` reinicien el servidor.
+
+```
+explore__start(app="kate -n", minutes=60)      # apps de instancia única: flag de nueva instancia
+explore__findings()                            # al volver: crashes/cuelgues únicos, más graves primero
+explore__finding(id) · explore__replay(id)     # solo aquí entra el modelo
 ```
 
 ### Escritorio

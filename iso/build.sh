@@ -36,7 +36,7 @@ done
 UWANTS="$PROFILE/airootfs/etc/systemd/user/default.target.wants"
 mkdir -p "$UWANTS"
 ln -sf /etc/systemd/user/mcpos-ydotoold.service "$UWANTS/mcpos-ydotoold.service"
-for b in mcpd mcp-shell mcp-journal mcp-desktop mcp-a11y; do
+for b in mcpd mcp-shell mcp-journal mcp-desktop mcp-a11y mcp-explore; do
     install -Dm755 "$ROOT/target/release/$b" "$PROFILE/airootfs/usr/local/bin/$b"
 done
 
@@ -57,6 +57,7 @@ file_permissions+=(
   ["/usr/local/bin/mcp-journal"]="0:0:755"
   ["/usr/local/bin/mcp-desktop"]="0:0:755"
   ["/usr/local/bin/mcp-a11y"]="0:0:755"
+  ["/usr/local/bin/mcp-explore"]="0:0:755"
   ["/usr/local/sbin/mcpos-update"]="0:0:755"
 )
 PERMS

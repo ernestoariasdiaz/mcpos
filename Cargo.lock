@@ -21,6 +21,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcp-explore"
+version = "0.1.0"
+dependencies = [
+ "mcp-core",
+]
+
+[[package]]
 name = "mcp-journal"
 version = "0.1.0"
 dependencies = [
