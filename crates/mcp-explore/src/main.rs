@@ -99,10 +99,11 @@ fn start(a: &Value) -> ToolResult {
     let mut cfg = obj([
         ("app", app.into()),
         ("minutes", minutes.into()),
-        ("max_steps_per_episode", a.i64_field("max_steps_per_episode").unwrap_or(50).into()),
+        ("max_steps_per_episode", a.i64_field("max_steps_per_episode").unwrap_or(80).into()),
         ("step_delay_ms", a.i64_field("step_delay_ms").unwrap_or(400).into()),
         ("seed", a.i64_field("seed").unwrap_or((unix_now() as i64) & 0xffff_ffff).into()),
         ("sandbox_home", a.bool_field("sandbox_home").unwrap_or(true).into()),
+        ("go_explore", a.bool_field("go_explore").unwrap_or(true).into()),
     ]);
     if let Some(d) = a.get("deny") { cfg.set("deny", d.clone()); }
     if let Err(e) = std::fs::write(dir.join("config.json"), cfg.to_json()) { return ToolResult::error(format!("config: {e}")); }
@@ -193,6 +194,29 @@ fn finding(a: &Value) -> ToolResult {
     }
 }
 
+fn coverage(a: &Value) -> ToolResult {
+    let dir = match run_dir(a) { Ok(d) => d, Err(e) => return ToolResult::error(e) };
+    let Some(c) = read_json(&dir.join("coverage.json")) else { return ToolResult::error("no coverage yet (written after each episode)") };
+    let mut out = format!("{}\n\nUI states reached (shortest known path from a fresh start):\n", status_text(&dir));
+    for st in c.get("states").and_then(|x| x.as_array()).into_iter().flatten() {
+        let path: Vec<&str> = st.get("path").and_then(|p| p.as_array()).into_iter().flatten().filter_map(|x| x.as_str()).collect();
+        out.push_str(&format!("  [{}] depth {} · used as start {}× · {}\n",
+            st.str_field("state").unwrap_or("?"), st.i64_field("depth").unwrap_or(0), st.i64_field("chosen").unwrap_or(0),
+            if path.is_empty() { "(start screen)".to_string() } else { truncate(&path.join(" → "), 300) }));
+    }
+    out.push_str("\nHow often each kind of control led somewhere new:\n");
+    for r in c.get("controls").and_then(|x| x.as_array()).into_iter().flatten() {
+        out.push_str(&format!("  {:<28} {:>5} tries  {:>5.1}% novel\n", r.str_field("control").unwrap_or("?"),
+            r.get("tries").and_then(|v| v.as_f64()).unwrap_or(0.0) as i64, 100.0 * r.get("novelty_rate").and_then(|v| v.as_f64()).unwrap_or(0.0)));
+    }
+    let list = |k: &str| c.get(k).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n  ")).unwrap_or_default();
+    out.push_str(&format!("\nMost tried:\n  {}\n\nSeen but never tried ({} of {} distinct actions tried):\n  {}\n",
+        list("most_tried"), c.i64_field("distinct_actions_tried").unwrap_or(0), c.i64_field("distinct_actions_seen").unwrap_or(0), list("never_tried")));
+    out.push_str("\nHints: few states + high tries on menus with 0% novelty = menus don't open via AT-SPI for this toolkit; \
+                  many actions never tried = raise minutes or max_steps_per_episode.");
+    ToolResult::text(out)
+}
+
 fn replay(a: &Value) -> ToolResult {
     let (dir, v) = match find_finding(a) { Ok(x) => x, Err(e) => return ToolResult::error(e) };
     let times = a.i64_field("times").unwrap_or(1).clamp(1, 5);
@@ -227,11 +251,12 @@ fn main() {
             schema(&[
                 ("app", "string", "Command line to launch, e.g. 'kate -n', 'dolphin --new-window', 'kcalc'"),
                 ("minutes", "number", "How long to explore (default 10)"),
-                ("max_steps_per_episode", "integer", "Restart the app after this many actions (default 50)"),
+                ("max_steps_per_episode", "integer", "Restart the app after this many actions (default 80)"),
                 ("step_delay_ms", "integer", "Wait after each action (default 400)"),
                 ("seed", "integer", "RNG seed, for reproducible runs"),
                 ("sandbox_home", "boolean", "Run the app with a throw-away HOME (default true)"),
                 ("deny", "array", "Extra substrings of element names never to click"),
+                ("go_explore", "boolean", "Return to rarely-visited known states before exploring (default true)"),
             ], &["app"]), start)
         .tool("status", "Progress of an exploration run (latest if 'run' omitted).",
             schema(&[("run", "string", "Run id")], &[]),
@@ -246,6 +271,9 @@ fn main() {
             schema(&[("run", "string", "Run id"), ("all_runs", "boolean", "Across all runs")], &[]), findings)
         .tool("finding", "One finding in full: signature, backtrace / evidence and the steps that led to it.",
             schema(&[("id", "string", "Finding id"), ("run", "string", "Run id")], &["id"]), finding)
+        .tool("coverage", "What the explorer reached: UI states with the path to each, how often each kind of control \
+             (button, menu, tab…) led somewhere new, and actions seen but never tried. Use it when a run finds little.",
+            schema(&[("run", "string", "Run id")], &[]), coverage)
         .tool("replay", "Replay a finding's steps on a fresh instance to check it reproduces (crash/hang).",
             schema(&[("id", "string", "Finding id"), ("run", "string", "Run id"), ("times", "integer", "Attempts (1-5)")], &["id"]), replay);
 

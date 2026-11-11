@@ -355,6 +355,36 @@ fn step_value(c: &Cand) -> Value {
 
 enum EpisodeEnd { Normal, Crashed, Hung, Exited, Stop }
 
+/// Re-apply one recorded step on the current UI, matching the element by role+name (paths shift).
+/// Ok(false) = element not present now.
+fn apply_step(worker: &mut Worker, pid: u64, s: &Value) -> Result<bool, WErr> {
+    let snap = worker.req(&obj([("cmd", "snapshot".into()), ("pid", pid.into())]), Duration::from_secs(15))?;
+    let (role, name, action) = (s.str_field("role").unwrap_or(""), s.str_field("name").unwrap_or(""), s.str_field("action").unwrap_or(""));
+    let Some(path) = snap.get("actions").and_then(|a| a.as_array()).and_then(|a| {
+        a.iter().find(|x| x.str_field("role") == Some(role) && x.str_field("name") == Some(name))
+            .and_then(|x| x.str_field("path").map(String::from))
+    }) else { return Ok(false) };
+    let req = if action == "type" {
+        let text = s.str_field("text").unwrap_or("").to_string();
+        let text = if text.starts_with("AAAAAAAA") { fuzz_long() } else { text };
+        obj([("cmd", "type".into()), ("pid", pid.into()), ("path", path.as_str().into()), ("text", text.into())])
+    } else {
+        obj([("cmd", "act".into()), ("pid", pid.into()), ("path", path.as_str().into()), ("action", action.into())])
+    };
+    worker.req(&req, Duration::from_secs(15)).map(|_| true)
+}
+
+/// Prior belief that an action on this kind of control opens something new.
+fn role_prior(role: &str, action: &str) -> f64 {
+    if action == "type" { return 0.6; }
+    match role {
+        "menu" | "menu item" | "check menu item" | "radio menu item" | "page tab" | "combo box"
+        | "toggle button" | "check box" | "radio button" | "tree item" | "link" | "list item" | "menu bar" => 1.0,
+        "push button" | "button" => 0.5,
+        _ => 0.4,
+    }
+}
+
 /// Run the exploration until the deadline / STOP file. Status and findings are written under `dir`.
 pub fn explore(dir: &Path) -> Result<(), String> {
     let mut r = Run::load(dir)?;
@@ -373,7 +403,14 @@ pub fn explore(dir: &Path) -> Result<(), String> {
     // UCB statistics keyed by (state, action key)
     let mut n_sa: HashMap<(String, String), (f64, f64)> = HashMap::new();
     let mut n_s: HashMap<String, f64> = HashMap::new();
-    r.event("start", &format!("app={app_cmd} minutes={minutes}"));
+    // Go-Explore archive: state -> (shortest known path from a fresh start, times chosen as start cell)
+    let mut archive: HashMap<String, (Vec<Value>, f64)> = HashMap::new();
+    // what each kind of control tends to do in *this* app: role|action -> (tries, novel outcomes)
+    let mut role_stats: HashMap<String, (f64, f64)> = HashMap::new();
+    let go_explore = r.cfg.bool_field("go_explore").unwrap_or(true);
+    let mut tried_keys: HashMap<String, u64> = HashMap::new();
+    let mut seen_keys: HashSet<String> = HashSet::new();
+    r.event("start", &format!("app={app_cmd} minutes={minutes} go_explore={go_explore}"));
     r.write_status(true);
 
     'run: while Instant::now() < deadline && !r.stop_requested() {
@@ -408,7 +445,28 @@ pub fn explore(dir: &Path) -> Result<(), String> {
         }
 
         let mut end = EpisodeEnd::Normal;
-        for _ in 0..max_ep_steps {
+        // Go-Explore: usually go back to a rarely-chosen known state, then explore from there
+        if go_explore && up && !archive.is_empty() && rng.unit() < 0.85 {
+            let keys: Vec<&String> = archive.keys().collect();
+            let weights: Vec<f64> = keys.iter().map(|k| 1.0 / (1.0 + archive[*k].1).sqrt()).collect();
+            let total: f64 = weights.iter().sum();
+            let mut pick = rng.unit() * total;
+            let mut chosen = keys[0].clone();
+            for (k, w) in keys.iter().zip(&weights) { if pick <= *w { chosen = (*k).clone(); break; } pick -= w; }
+            let path = archive[&chosen].0.clone();
+            archive.get_mut(&chosen).unwrap().1 += 1.0;
+            for st in &path {
+                match apply_step(&mut worker, app.pid as u64, st) {
+                    Ok(true) => { repro.push(st.clone()); r.steps += 1; std::thread::sleep(delay); }
+                    Ok(false) => break, // UI differs this time: explore from wherever we are
+                    Err(WErr::Timeout) => { end = EpisodeEnd::Hung; break; }
+                    Err(WErr::Dead(_)) => { let _ = worker.restart(); break; }
+                }
+                if let Ok(Some(_)) = app.child.try_wait() { end = EpisodeEnd::Exited; break; }
+            }
+        }
+        let budget = if matches!(end, EpisodeEnd::Normal) { max_ep_steps } else { 0 };
+        for _ in 0..budget {
             if r.stop_requested() || Instant::now() >= deadline { end = EpisodeEnd::Stop; break; }
             if let Ok(Some(_)) = app.child.try_wait() { end = EpisodeEnd::Exited; break; }
 
@@ -426,9 +484,19 @@ pub fn explore(dir: &Path) -> Result<(), String> {
             not_found = 0;
             let state = snap.str_field("hash").unwrap_or("").to_string();
             let is_new = r.states.insert(state.clone());
-            if let Some(k) = prev.take() {
-                let e = n_sa.entry(k).or_insert((0.0, 0.0));
+            if let Some((ps, pk)) = prev.take() {
+                let changed = ps != state;
+                let e = n_sa.entry((ps, pk.clone())).or_insert((0.0, 0.0));
                 e.1 += if is_new { 1.0 } else { 0.0 };
+                let rk = role_key(&pk);
+                let re = role_stats.entry(rk).or_insert((0.0, 0.0));
+                re.0 += 1.0;
+                re.1 += if is_new { 1.0 } else if changed { 0.25 } else { 0.0 };
+            }
+            match archive.get_mut(&state) {
+                None => { archive.insert(state.clone(), (repro.clone(), 0.0)); }
+                Some(c) if repro.len() < c.0.len() => c.0 = repro.clone(),
+                _ => {}
             }
             *n_s.entry(state.clone()).or_insert(0.0) += 1.0;
 
@@ -439,14 +507,16 @@ pub fn explore(dir: &Path) -> Result<(), String> {
             let mut best = 0usize;
             let mut best_score = f64::MIN;
             for (i, c) in cands.iter().enumerate() {
-                let score = match n_sa.get(&(state.clone(), c.key.clone())) {
-                    None => 1e9 + rng.unit(),
-                    Some((n, w)) if *n > 0.0 => w / n + 1.2 * (ns.ln().max(0.0) / n).sqrt() + rng.unit() * 1e-3,
-                    Some(_) => 1e9 + rng.unit(),
-                };
+                seen_keys.insert(c.key.clone());
+                // smoothed estimate of how often this kind of control leads somewhere new in this app
+                let (rn, rw) = role_stats.get(&role_key(&c.key)).copied().unwrap_or((0.0, 0.0));
+                let role_mean = (rw + 2.0 * role_prior(&c.role, &c.action)) / (rn + 2.0);
+                let (n, w) = n_sa.get(&(state.clone(), c.key.clone())).copied().unwrap_or((0.0, 0.0));
+                let score = (w + role_mean) / (n + 1.0) + 1.0 * ((ns + 1.0).ln() / (n + 1.0)).sqrt() + rng.unit() * 0.05;
                 if score > best_score { best_score = score; best = i; }
             }
             let c = &cands[best];
+            *tried_keys.entry(c.key.clone()).or_insert(0) += 1;
             n_sa.entry((state.clone(), c.key.clone())).or_insert((0.0, 0.0)).0 += 1.0;
             prev = Some((state.clone(), c.key.clone()));
             repro.push(step_value(c));
@@ -499,11 +569,51 @@ pub fn explore(dir: &Path) -> Result<(), String> {
             r.finding("log-error", &sig, &line, &repro, &line);
         }
         r.write_status(true);
+        write_coverage(dir, &archive, &role_stats, &tried_keys, &seen_keys);
         if matches!(end, EpisodeEnd::Stop) { break 'run; }
     }
     r.event("done", &format!("{} steps, {} episodes, {} states, {} findings", r.steps, r.episodes, r.states.len(), r.findings.len()));
     r.write_status(false);
     Ok(())
+}
+
+fn role_key(action_key: &str) -> String {
+    // "role|name|action" -> "role|action"
+    let mut it = action_key.split('|');
+    let role = it.next().unwrap_or("");
+    let action = action_key.rsplit('|').next().unwrap_or("");
+    format!("{role}|{action}")
+}
+
+fn write_coverage(dir: &Path, archive: &HashMap<String, (Vec<Value>, f64)>, role_stats: &HashMap<String, (f64, f64)>,
+                  tried: &HashMap<String, u64>, seen: &HashSet<String>) {
+    let mut states: Vec<(&String, &(Vec<Value>, f64))> = archive.iter().collect();
+    states.sort_by_key(|(_, (p, _))| p.len());
+    let states: Vec<Value> = states.iter().map(|(h, (p, chosen))| obj([
+        ("state", h.as_str().into()),
+        ("depth", p.len().into()),
+        ("chosen", (*chosen).into()),
+        ("path", Value::Arr(p.iter().map(|st| Value::Str(format!("{} {} {:?}",
+            st.str_field("action").unwrap_or(""), st.str_field("role").unwrap_or(""), st.str_field("name").unwrap_or("")))).collect())),
+    ])).collect();
+    let mut roles: Vec<(&String, &(f64, f64))> = role_stats.iter().collect();
+    roles.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap_or(std::cmp::Ordering::Equal));
+    let roles: Vec<Value> = roles.iter().map(|(k, (n, w))| obj([
+        ("control", k.as_str().into()), ("tries", (*n).into()), ("novelty_rate", (if *n > 0.0 { w / n } else { 0.0 }).into()),
+    ])).collect();
+    let mut never: Vec<&String> = seen.iter().filter(|k| !tried.contains_key(*k)).collect();
+    never.sort();
+    let mut top: Vec<(&String, &u64)> = tried.iter().collect();
+    top.sort_by(|a, b| b.1.cmp(a.1));
+    let v = obj([
+        ("states", Value::Arr(states)),
+        ("controls", Value::Arr(roles)),
+        ("most_tried", Value::Arr(top.iter().take(15).map(|(k, n)| Value::Str(format!("{n}× {k}"))).collect())),
+        ("never_tried", Value::Arr(never.iter().take(60).map(|k| Value::Str((*k).clone())).collect())),
+        ("distinct_actions_seen", seen.len().into()),
+        ("distinct_actions_tried", tried.len().into()),
+    ]);
+    let _ = std::fs::write(dir.join("coverage.json"), v.to_json());
 }
 
 /// Replay a finding's repro steps (matched by role+name+action, falling back to path) and

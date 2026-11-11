@@ -120,6 +120,7 @@ el árbol de accesibilidad de una app eligiendo acciones que llevan a **estados 
   así un timestamp no cuenta como "estado nuevo" (la lección de Phantom Nodes).
 - Nunca pulsa acciones destructivas o de salida (borrar, papelera, salir, cerrar sesión…; ampliable con `deny`)
   y la app corre con un `HOME` desechable.
+- **Go-Explore**: guarda la ruta conocida más corta a cada estado y empieza los episodios volviendo a estados poco visitados; además aprende qué tipo de control (menú, pestaña, botón…) abre cosas nuevas en esa app.
 - Cada hallazgo guarda los pasos del episodio; `explore__replay` los repite en una instancia limpia.
 - Las corridas siguen vivas aunque `mcpd` o `mcpos-update` reinicien el servidor.
 
@@ -127,6 +128,7 @@ el árbol de accesibilidad de una app eligiendo acciones que llevan a **estados 
 explore__start(app="kate -n", minutes=60)      # apps de instancia única: flag de nueva instancia
 explore__findings()                            # al volver: crashes/cuelgues únicos, más graves primero
 explore__finding(id) · explore__replay(id)     # solo aquí entra el modelo
+explore__coverage()                            # qué alcanzó: estados, rutas, qué controles abren cosas nuevas
 ```
 
 ### Escritorio

@@ -95,7 +95,9 @@ def snapshot(pid):
             continue
         role = safe(lambda: acc.get_role_name(), "?") or "?"
         name = norm(safe(lambda: acc.get_name(), ""))
-        h.update(f"{depth}|{role}|{name};".encode())
+        # mode-like flags are structure too (e.g. a calculator switching to "Science Mode")
+        flags = "".join(f for f, k in (("c", "checked"), ("s", "selected"), ("x", "expanded")) if k in st)
+        h.update(f"{depth}|{role}|{name}|{flags};".encode())
         enabled = "enabled" in st or "sensitive" in st
         a = actions_of(acc) if enabled else []
         editable = enabled and ("editable" in st) and ("EditableText" in ifaces(acc))
