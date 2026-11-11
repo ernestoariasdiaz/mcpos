@@ -42,7 +42,7 @@ for b in "$SRC"/target/release/mcpd "$SRC"/target/release/mcp-*; do
     sudo install -m755 "$b" /usr/local/bin/
     echo "  $(basename "$b")"
 done
-sudo install -m755 "$OV/usr/local/bin/mcpos-agent" /usr/local/bin/
+sudo install -m755 "$OV/usr/local/bin/mcpos-agent" "$OV/usr/local/bin/mcpos-wiki-lint" /usr/local/bin/
 sudo install -m755 "$OV/usr/local/sbin/mcpos-install" "$OV/usr/local/sbin/mcpos-update" /usr/local/sbin/
 
 say "servers.conf: añadiendo servidores nuevos (tus cambios se respetan)"
@@ -75,6 +75,22 @@ for f in .config/mcpos/session .config/autostart/mcpos-agent.desktop .config/ksc
     install -Dm644 "$OV/etc/skel/$f" "$HOME/$f"
     echo "  + $f"
 done
+
+say "Wiki de mcpOS (~/mcpos-wiki): se crea si no existe; si existe, solo se actualiza el esquema"
+if [[ ! -d $HOME/mcpos-wiki ]]; then
+    cp -r "$OV/etc/skel/mcpos-wiki" "$HOME/mcpos-wiki"
+    git -C "$HOME/mcpos-wiki" init -q && git -C "$HOME/mcpos-wiki" add -A && \
+        git -C "$HOME/mcpos-wiki" -c user.name=mcpos -c user.email=mcpos@localhost commit -qm "siembra inicial" || true
+    echo "  + ~/mcpos-wiki creada (sembrada con lo aprendido hasta ahora)"
+else
+    # the schema evolves with mcpOS; the pages are the agent's and are never overwritten
+    if ! cmp -s "$OV/etc/skel/mcpos-wiki/CLAUDE.md" "$HOME/mcpos-wiki/CLAUDE.md"; then
+        cp "$HOME/mcpos-wiki/CLAUDE.md" "$HOME/mcpos-wiki/CLAUDE.md.bak" 2>/dev/null || true
+        install -m644 "$OV/etc/skel/mcpos-wiki/CLAUDE.md" "$HOME/mcpos-wiki/CLAUDE.md"
+        echo "  esquema actualizado (copia en CLAUDE.md.bak)"
+    fi
+fi
+[[ -f $HOME/CLAUDE.md ]] || { install -m644 "$OV/etc/skel/CLAUDE.md" "$HOME/CLAUDE.md"; echo "  + ~/CLAUDE.md"; }
 
 say "Dotfiles de $USER (copia de seguridad *.bak si cambian)"
 for f in .bash_profile .bashrc .config/sway/config .mcp.json; do

@@ -52,6 +52,7 @@ file_permissions+=(
   ["/usr/local/sbin/mcpos-setup-user"]="0:0:755"
   ["/usr/local/sbin/mcpos-install"]="0:0:755"
   ["/usr/local/bin/mcpos-agent"]="0:0:755"
+  ["/usr/local/bin/mcpos-wiki-lint"]="0:0:755"
   ["/usr/local/bin/mcpd"]="0:0:755"
   ["/usr/local/bin/mcp-shell"]="0:0:755"
   ["/usr/local/bin/mcp-journal"]="0:0:755"

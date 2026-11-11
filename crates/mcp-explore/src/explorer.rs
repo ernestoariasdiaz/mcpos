@@ -238,6 +238,8 @@ pub struct Run {
     pub steps: u64,
     pub episodes: u64,
     pub states: HashSet<String>,
+    pub actions_seen: usize,
+    pub actions_tried: usize,
     last_event: String,
     started: f64,
 }
@@ -256,7 +258,7 @@ impl Run {
                 }
             }
         }
-        Ok(Run { dir: dir.to_path_buf(), cfg, findings, steps: 0, episodes: 0, states: HashSet::new(),
+        Ok(Run { dir: dir.to_path_buf(), cfg, findings, steps: 0, episodes: 0, states: HashSet::new(), actions_seen: 0, actions_tried: 0,
                  last_event: "starting".into(), started: unix_now() })
     }
 
@@ -279,6 +281,8 @@ impl Run {
             ("episodes", self.episodes.into()),
             ("states", self.states.len().into()),
             ("findings", self.findings.len().into()),
+            ("actions_seen", self.actions_seen.into()),
+            ("actions_tried", self.actions_tried.into()),
             ("last_event", self.last_event.as_str().into()),
         ]);
         let tmp = self.dir.join("status.json.tmp");
@@ -332,7 +336,7 @@ fn candidates(snap: &Value, deny: &[String], rng: &mut Rng) -> Vec<Cand> {
         let name = a.str_field("name").unwrap_or("").to_string();
         if denied(&name, deny) { continue; }
         for act in a.get("acts").and_then(|x| x.as_array()).into_iter().flatten().filter_map(|x| x.as_str()) {
-            if denied(act, deny) { continue; }
+            if denied(act, deny) || is_focus_only(act) { continue; }
             out.push(Cand { key: format!("{role}|{name}|{act}"), path: path.clone(), role: role.clone(),
                             name: name.clone(), action: act.to_string(), text: None });
         }
@@ -374,6 +378,11 @@ fn apply_step(worker: &mut Worker, pid: u64, s: &Value) -> Result<bool, WErr> {
     worker.req(&req, Duration::from_secs(15)).map(|_| true)
 }
 
+/// AT-SPI actions that only move keyboard focus (Qt exposes "SetFocus" on almost everything).
+fn is_focus_only(act: &str) -> bool {
+    matches!(act.to_lowercase().replace(['_', ' ', '-'], "").as_str(), "setfocus" | "focus" | "grabfocus")
+}
+
 /// Prior belief that an action on this kind of control opens something new.
 fn role_prior(role: &str, action: &str) -> f64 {
     if action == "type" { return 0.6; }
@@ -405,9 +414,16 @@ pub fn explore(dir: &Path) -> Result<(), String> {
     let mut n_s: HashMap<String, f64> = HashMap::new();
     // Go-Explore archive: state -> (shortest known path from a fresh start, times chosen as start cell)
     let mut archive: HashMap<String, (Vec<Value>, f64)> = HashMap::new();
+    let mut archive_trail: HashMap<String, Vec<String>> = HashMap::new();
     // what each kind of control tends to do in *this* app: role|action -> (tries, novel outcomes)
     let mut role_stats: HashMap<String, (f64, f64)> = HashMap::new();
     let go_explore = r.cfg.bool_field("go_explore").unwrap_or(true);
+    // seed paths compiled in the wiki (apps/<app>.md): start cells before anything is discovered
+    for (i, p) in r.cfg.get("seeds").and_then(|v| v.as_array()).into_iter().flatten().enumerate() {
+        if let Some(steps) = p.as_array() {
+            if !steps.is_empty() { archive.insert(format!("seed-{i}"), (steps.clone(), 0.0)); }
+        }
+    }
     let mut tried_keys: HashMap<String, u64> = HashMap::new();
     let mut seen_keys: HashSet<String> = HashSet::new();
     r.event("start", &format!("app={app_cmd} minutes={minutes} go_explore={go_explore}"));
@@ -417,6 +433,7 @@ pub fn explore(dir: &Path) -> Result<(), String> {
         r.episodes += 1;
         let mut app = launch(&app_cmd, if sandbox { Some(&home) } else { None })?;
         let mut repro: Vec<Value> = Vec::new();
+        let mut trail: Vec<String> = Vec::new(); // UI state before each repro step
         let mut prev: Option<(String, String)> = None; // (state, key) of the last action
         let mut not_found = 0;
 
@@ -454,10 +471,15 @@ pub fn explore(dir: &Path) -> Result<(), String> {
             let mut chosen = keys[0].clone();
             for (k, w) in keys.iter().zip(&weights) { if pick <= *w { chosen = (*k).clone(); break; } pick -= w; }
             let path = archive[&chosen].0.clone();
+            let ptrail = archive_trail.get(&chosen).cloned().unwrap_or_default();
             archive.get_mut(&chosen).unwrap().1 += 1.0;
-            for st in &path {
+            for (i, st) in path.iter().enumerate() {
                 match apply_step(&mut worker, app.pid as u64, st) {
-                    Ok(true) => { repro.push(st.clone()); r.steps += 1; std::thread::sleep(delay); }
+                    Ok(true) => {
+                        // known states along an archived path; unique markers for wiki seeds (states unknown)
+                        trail.push(ptrail.get(i).cloned().unwrap_or_else(|| format!("{chosen}#{i}")));
+                        repro.push(st.clone()); r.steps += 1; std::thread::sleep(delay);
+                    }
                     Ok(false) => break, // UI differs this time: explore from wherever we are
                     Err(WErr::Timeout) => { end = EpisodeEnd::Hung; break; }
                     Err(WErr::Dead(_)) => { let _ = worker.restart(); break; }
@@ -493,9 +515,10 @@ pub fn explore(dir: &Path) -> Result<(), String> {
                 re.0 += 1.0;
                 re.1 += if is_new { 1.0 } else if changed { 0.25 } else { 0.0 };
             }
+            let (short, strail) = loop_free(&repro, &trail);
             match archive.get_mut(&state) {
-                None => { archive.insert(state.clone(), (repro.clone(), 0.0)); }
-                Some(c) if repro.len() < c.0.len() => c.0 = repro.clone(),
+                None => { archive.insert(state.clone(), (short, 0.0)); archive_trail.insert(state.clone(), strail); }
+                Some(c) if short.len() < c.0.len() => { c.0 = short; archive_trail.insert(state.clone(), strail); }
                 _ => {}
             }
             *n_s.entry(state.clone()).or_insert(0.0) += 1.0;
@@ -512,13 +535,16 @@ pub fn explore(dir: &Path) -> Result<(), String> {
                 let (rn, rw) = role_stats.get(&role_key(&c.key)).copied().unwrap_or((0.0, 0.0));
                 let role_mean = (rw + 2.0 * role_prior(&c.role, &c.action)) / (rn + 2.0);
                 let (n, w) = n_sa.get(&(state.clone(), c.key.clone())).copied().unwrap_or((0.0, 0.0));
-                let score = (w + role_mean) / (n + 1.0) + 1.0 * ((ns + 1.0).ln() / (n + 1.0)).sqrt() + rng.unit() * 0.05;
+                let never_tried_anywhere = if tried_keys.contains_key(&c.key) { 0.0 } else { 0.9 };
+                let score = (w + role_mean) / (n + 1.0) + 1.0 * ((ns + 1.0).ln() / (n + 1.0)).sqrt()
+                    + never_tried_anywhere + rng.unit() * 0.05;
                 if score > best_score { best_score = score; best = i; }
             }
             let c = &cands[best];
             *tried_keys.entry(c.key.clone()).or_insert(0) += 1;
             n_sa.entry((state.clone(), c.key.clone())).or_insert((0.0, 0.0)).0 += 1.0;
             prev = Some((state.clone(), c.key.clone()));
+            trail.push(state.clone());
             repro.push(step_value(c));
 
             let req = match &c.text {
@@ -531,6 +557,8 @@ pub fn explore(dir: &Path) -> Result<(), String> {
                 Err(WErr::Dead(e)) => { r.event("warn", &format!("worker died: {e}")); let _ = worker.restart(); }
             }
             r.steps += 1;
+            r.actions_seen = seen_keys.len();
+            r.actions_tried = tried_keys.len();
             if r.steps % 5 == 0 { r.write_status(true); }
             std::thread::sleep(delay);
             if let Ok(Some(_)) = app.child.try_wait() { end = EpisodeEnd::Exited; break; }
@@ -577,6 +605,17 @@ pub fn explore(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Remove loops from a path: `trail[i]` is the UI state *before* `steps[i]`. Whenever a state repeats,
+/// the detour between its two visits is dropped, so archive paths (and wiki seeds) stay short.
+pub fn loop_free(steps: &[Value], trail: &[String]) -> (Vec<Value>, Vec<String>) {
+    let mut out: Vec<(&String, &Value)> = Vec::new();
+    for (st, s) in trail.iter().zip(steps) {
+        if let Some(pos) = out.iter().position(|(t, _)| *t == st) { out.truncate(pos); }
+        out.push((st, s));
+    }
+    (out.iter().map(|(_, v)| (*v).clone()).collect(), out.iter().map(|(t, _)| (*t).clone()).collect())
+}
+
 fn role_key(action_key: &str) -> String {
     // "role|name|action" -> "role|action"
     let mut it = action_key.split('|');
@@ -595,6 +634,11 @@ fn write_coverage(dir: &Path, archive: &HashMap<String, (Vec<Value>, f64)>, role
         ("chosen", (*chosen).into()),
         ("path", Value::Arr(p.iter().map(|st| Value::Str(format!("{} {} {:?}",
             st.str_field("action").unwrap_or(""), st.str_field("role").unwrap_or(""), st.str_field("name").unwrap_or("")))).collect())),
+        ("path_steps", Value::Arr(p.iter().map(|st| obj([
+            ("role", st.str_field("role").unwrap_or("").into()),
+            ("name", st.str_field("name").unwrap_or("").into()),
+            ("action", st.str_field("action").unwrap_or("").into()),
+        ])).collect())),
     ])).collect();
     let mut roles: Vec<(&String, &(f64, f64))> = role_stats.iter().collect();
     roles.sort_by(|a, b| b.1 .0.partial_cmp(&a.1 .0).unwrap_or(std::cmp::Ordering::Equal));
@@ -697,6 +741,18 @@ mod tests {
     #[test]
     fn logs() {
         assert_eq!(norm_log("QFile 0x55d3a1 failed after 1234 ms on fd 7"), "QFile 0x# failed after # ms on fd #");
+    }
+    #[test]
+    fn loops_removed() {
+        let st = |n: &str| obj([("name", n.into())]);
+        let steps = vec![st("Menu1"), st("Dialog"), st("Opt"), st("Back"), st("Menu4"), st("Dialog42")];
+        let trail: Vec<String> = ["main", "m1", "d10", "d10", "main", "m4"].iter().map(|x| x.to_string()).collect();
+        let names: Vec<String> = loop_free(&steps, &trail).0.iter().map(|v| v.str_field("name").unwrap().to_string()).collect();
+        assert_eq!(names, vec!["Menu4", "Dialog42"]);
+    }
+    #[test]
+    fn focus() {
+        assert!(is_focus_only("SetFocus") && is_focus_only("grab_focus") && !is_focus_only("Press"));
     }
     #[test]
     fn deny() {

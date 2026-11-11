@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""mcpos-wiki-lint — free, mechanical health check of ~/mcpos-wiki (no LLM, no tokens).
+
+Finds what a script can find; the agent then handles what needs judgement (contradictions,
+stale claims, near-duplicate concepts). Usage: mcpos-wiki-lint [WIKI_DIR]
+"""
+import difflib
+import json
+import os
+import re
+import sys
+import time
+
+WIKI = os.path.expanduser(sys.argv[1] if len(sys.argv) > 1 else os.environ.get("MCPOS_WIKI", "~/mcpos-wiki"))
+SPECIAL = {"index", "log", "overview", "CLAUDE"}
+LINK = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
+BUG_STATUS = {"nuevo", "reproducido", "reportado", "corregido-upstream", "no-reproducible", "no-es-bug"}
+
+
+def pages(root):
+    out = {}
+    for d, _, files in os.walk(root):
+        if "/.git" in d or d.endswith(".git") or "/.obsidian" in d:
+            continue
+        for f in files:
+            if f.endswith(".md"):
+                full = os.path.join(d, f)
+                out[os.path.relpath(full, root)[:-3]] = full
+    return out
+
+
+def frontmatter(text):
+    if not text.startswith("---"):
+        return {}
+    end = text.find("\n---", 3)
+    fm = {}
+    for line in text[3:end].splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            fm[k.strip()] = v.strip().strip('"')
+    return fm
+
+
+def main():
+    if not os.path.isdir(WIKI):
+        print(f"no wiki at {WIKI}")
+        return 1
+    allp = pages(WIKI)
+    wiki = {k: v for k, v in allp.items() if not k.startswith("raw/") and k != "CLAUDE"}
+    raw = {k: v for k, v in allp.items() if k.startswith("raw/")}
+    text = {k: open(v, encoding="utf-8", errors="replace").read() for k, v in allp.items()}
+    problems = []
+
+    inbound = {k: 0 for k in wiki}
+    mentioned = set()
+    def prose(t):
+        # links inside code blocks / inline code are examples, not links
+        t = re.sub(r"```.*?```", "", t, flags=re.S)
+        return re.sub(r"`[^`\n]*`", "", t)
+
+    for k in wiki:
+        for target in LINK.findall(prose(text[k])):
+            t = target.strip().removesuffix(".md")
+            mentioned.add(t)
+            if t not in allp:
+                problems.append(("enlace roto", f"{k}.md → [[{t}]]"))
+            elif t in inbound and t != k:
+                inbound[t] += 1
+        # plain-text references to raw sources count as citations
+        for m in re.findall(r"raw/[\w./-]+?\.md", text[k]):
+            mentioned.add(m[:-3])
+
+    for k, n in inbound.items():
+        if n == 0 and os.path.basename(k) not in SPECIAL and k != "CLAUDE":
+            problems.append(("página huérfana", f"{k}.md (nadie la enlaza)"))
+
+    idx = text.get("index", "")
+    for k in wiki:
+        if os.path.basename(k) not in SPECIAL and f"[[{k}]]" not in idx and f"[[{k}|" not in idx:
+            problems.append(("falta en index.md", f"{k}.md"))
+
+    for k in raw:
+        if k.startswith("raw/runs/") and k not in mentioned:
+            problems.append(("corrida sin ingerir", f"{k}.md (ninguna página la cita)"))
+
+    for k in wiki:
+        if k.startswith("apps/"):
+            m = re.search(r"```mcpos-explore\s*(.*?)```", text[k], re.S)
+            if not m:
+                problems.append(("app sin bloque mcpos-explore", f"{k}.md"))
+                continue
+            try:
+                h = json.loads(m.group(1))
+                if not isinstance(h.get("seeds", []), list) or not all(
+                        isinstance(p, list) and all({"role", "name", "action"} <= set(s) for s in p) for p in h.get("seeds", [])):
+                    problems.append(("semillas mal formadas", f"{k}.md (cada paso necesita role, name, action)"))
+                if not h.get("launch"):
+                    problems.append(("app sin launch", f"{k}.md"))
+            except json.JSONDecodeError as e:
+                problems.append(("JSON inválido en mcpos-explore", f"{k}.md: {e}"))
+            fm = frontmatter(text[k])
+            last = fm.get("last_run", "")
+            if last:
+                try:
+                    age = (time.time() - time.mktime(time.strptime(last, "%Y-%m-%d"))) / 86400
+                    if age > 30:
+                        problems.append(("app sin corridas recientes", f"{k}.md (última {last}, hace {age:.0f} días)"))
+                except ValueError:
+                    pass
+        if k.startswith("bugs/"):
+            st = frontmatter(text[k]).get("status", "")
+            if st not in BUG_STATUS:
+                problems.append(("bug sin status válido", f"{k}.md (status='{st}'; usa {', '.join(sorted(BUG_STATUS))})"))
+
+    # near-duplicate page names inside the same folder ("phantom pages")
+    names = sorted(wiki)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if os.path.dirname(a) != os.path.dirname(b):
+                continue
+            na, nb = (re.sub(r"[^a-z0-9]", "", os.path.basename(x).lower()) for x in (a, b))
+            if na and nb and (na == nb or difflib.SequenceMatcher(None, na, nb).ratio() >= 0.85):
+                problems.append(("posible duplicado", f"{a}.md ≈ {b}.md"))
+
+    for m in mentioned:
+        if m.startswith(("apps/", "toolkits/", "concepts/", "bugs/")) and m not in allp:
+            pass  # already reported as broken link
+
+    print(f"mcpos-wiki-lint · {WIKI}")
+    print(f"  {len(wiki)} páginas de wiki, {len(raw)} fuentes en bruto, {len(problems)} avisos")
+    if not problems:
+        print("  ✓ sin problemas mecánicos (revisa a mano contradicciones y afirmaciones viejas)")
+        return 0
+    kinds = {}
+    for kind, msg in problems:
+        kinds.setdefault(kind, []).append(msg)
+    for kind, msgs in kinds.items():
+        print(f"\n  {kind} ({len(msgs)}):")
+        for m in msgs[:25]:
+            print(f"    - {m}")
+        if len(msgs) > 25:
+            print(f"    … {len(msgs) - 25} más")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

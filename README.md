@@ -120,7 +120,7 @@ el árbol de accesibilidad de una app eligiendo acciones que llevan a **estados 
   así un timestamp no cuenta como "estado nuevo" (la lección de Phantom Nodes).
 - Nunca pulsa acciones destructivas o de salida (borrar, papelera, salir, cerrar sesión…; ampliable con `deny`)
   y la app corre con un `HOME` desechable.
-- **Go-Explore**: guarda la ruta conocida más corta a cada estado y empieza los episodios volviendo a estados poco visitados; además aprende qué tipo de control (menú, pestaña, botón…) abre cosas nuevas en esa app.
+- **Go-Explore**: guarda la ruta conocida más corta a cada estado y empieza los episodios volviendo a estados poco visitados; además aprende qué tipo de control (menú, pestaña, botón…) abre cosas nuevas en esa app, y da un bono a cada acción que aún no se ha probado en la corrida (los bugs de una calculadora están en botones que no cambian la pantalla). Las acciones que solo dan foco (`SetFocus`) se ignoran.
 - Cada hallazgo guarda los pasos del episodio; `explore__replay` los repite en una instancia limpia.
 - Las corridas siguen vivas aunque `mcpd` o `mcpos-update` reinicien el servidor.
 
@@ -129,7 +129,29 @@ explore__start(app="kate -n", minutes=60)      # apps de instancia única: flag 
 explore__findings()                            # al volver: crashes/cuelgues únicos, más graves primero
 explore__finding(id) · explore__replay(id)     # solo aquí entra el modelo
 explore__coverage()                            # qué alcanzó: estados, rutas, qué controles abren cosas nuevas
+explore__digest()                              # resumen compacto → ~/mcpos-wiki/raw/runs/ para ingerir
 ```
+
+### Memoria: `~/mcpos-wiki` (patrón *LLM Wiki* de Karpathy)
+
+Lo que se aprende no se redescubre: el agente compila cada corrida, bug y rareza de toolkit en una wiki
+de Markdown (abrible en Obsidian) que él mismo mantiene.
+
+| Capa | Contenido |
+|---|---|
+| Fuentes (inmutables) | `raw/runs/*.md` (de `explore__digest`, sin tokens), `raw/notes/`, `raw/upstream/` |
+| Wiki (del agente) | `apps/`, `toolkits/`, `bugs/`, `concepts/`, `overview.md`, `index.md`, `log.md` |
+| Esquema | `~/mcpos-wiki/CLAUDE.md`: tipos de página y las operaciones ingesta, consulta y lint |
+
+- Cada `apps/<app>.md` termina con un bloque ```` ```mcpos-explore ```` (JSON: `launch`, `deny`, `seeds`).
+  `explore__start(app="kcalc")` lo aplica: la siguiente corrida empieza donde terminó la anterior.
+- Las rutas del archivo de Go-Explore se guardan **sin bucles** (si se repite un estado se quita el rodeo),
+  así las semillas son cortas.
+- `mcpos-wiki-lint`: revisión mecánica gratis (enlaces rotos, huérfanas, falta en el índice, corridas sin
+  ingerir, bloques `mcpos-explore` inválidos, bugs sin estado, nombres casi duplicados).
+- `~/CLAUDE.md` le dice al agente que lea la wiki antes de explorar y que la mantenga.
+- La ISO la siembra con lo verificado en las primeras sesiones (Qt, Firefox, KWin, gdb, KCalc, Kate).
+- Prueba en mock: con las semillas de la wiki, la segunda corrida halló el crash en 9 s (sin wiki: 33–46 s).
 
 ### Escritorio
 

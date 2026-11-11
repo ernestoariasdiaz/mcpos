@@ -88,6 +88,7 @@ genfstab -U "$MNT" >> "$MNT/etc/fstab"
 
 say "Copiando mcpOS (mcpd, servidores, configuración)"
 cp -a /usr/local/bin/mcpd /usr/local/bin/mcp-* "$MNT/usr/local/bin/"
+[[ -f /usr/local/bin/mcpos-wiki-lint ]] && cp -a /usr/local/bin/mcpos-wiki-lint "$MNT/usr/local/bin/"
 install -Dm755 "$0" "$MNT/usr/local/sbin/mcpos-install"
 [[ -f /usr/local/sbin/mcpos-update ]] && install -Dm755 /usr/local/sbin/mcpos-update "$MNT/usr/local/sbin/mcpos-update"
 for p in /etc/mcpd /etc/sudoers.d/10-mcp /etc/sysctl.d/90-mcpos-debug.conf \
